@@ -279,6 +279,15 @@ python:
     connect-timeout: 30000
     read-timeout: 180000
 
+# Python AI 微服务配置（M2 答疑/讲题用，PythonAIClient 调用）
+# Java 通过 WebClient 调用 Python FastAPI 内部接口
+  ai:
+    base-url: http://localhost:8001          # Python 服务地址
+    generate-path: /api/internal/ai/generate # 非流式调用
+    stream-path: /api/internal/ai/generate/stream  # 流式 SSE
+    connect-timeout: 10  # 连接超时（秒）
+    read-timeout: 120    # 读超时（秒），流式需较长
+
 # MinIO对象存储配置（PPT、音频文件上传使用）
 # MinIO文件存储配置
 minio:

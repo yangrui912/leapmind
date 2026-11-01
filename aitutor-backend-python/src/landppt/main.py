@@ -27,6 +27,10 @@ from .api.internal_ai import router as internal_ai_router
 from .api.weak_points_api import router as weak_points_router
 from .m6.router import router as m6_router
 
+# LeapMind AI service routes
+from .leapmind.api.ocr_process import router as leapmind_ocr_router
+from .leapmind.api.ai_generate_stream import router as leapmind_ai_router
+
 from .web import router as web_router
 from .auth import auth_router, create_auth_middleware
 from .database.database import init_db
@@ -128,6 +132,10 @@ app.include_router(web_router, prefix="", tags=["Web Interface"])
 app.include_router(lesson_prep_router)
 app.include_router(internal_ai_router)
 app.include_router(m6_router, prefix="", tags=["M6 复习与画像"])
+
+# LeapMind AI service routes
+app.include_router(leapmind_ocr_router, prefix="", tags=["LeapMind AI Service"])
+app.include_router(leapmind_ai_router, prefix="", tags=["LeapMind AI Service"])
 
 # Mount static files
 import os
