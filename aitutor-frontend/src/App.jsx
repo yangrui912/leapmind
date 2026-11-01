@@ -193,7 +193,7 @@ export default function App() {
                 ) : (
                     <div className="relative w-full h-full">
                         <LoginPage2 onLoginSuccess={handleLoginSuccess} />
-                        {import.meta.env.DEV && (
+                        {(import.meta.env.DEV || import.meta.env.VITE_SKIP_LOGIN === 'true') && (
                             <button
                                 onClick={() => { setIsAuthed(true); console.log('开发模式：已跳过登录') }}
                                 className="fixed top-4 right-4 z-50 px-4 py-2 bg-gray-800 text-white text-sm rounded-lg hover:bg-gray-700 shadow"
