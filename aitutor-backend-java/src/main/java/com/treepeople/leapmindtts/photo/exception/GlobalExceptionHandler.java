@@ -1,4 +1,4 @@
-﻿package com.treepeople.leapmindtts.photo.exception;
+package com.treepeople.leapmindtts.photo.exception;
 
 import com.treepeople.leapmindtts.photo.dto.Result;
 import org.springframework.web.bind.annotation.ExceptionHandler;

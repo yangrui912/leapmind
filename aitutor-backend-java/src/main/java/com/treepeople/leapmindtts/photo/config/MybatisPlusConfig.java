@@ -1,4 +1,4 @@
-﻿package com.treepeople.leapmindtts.photo.config;
+package com.treepeople.leapmindtts.photo.config;
 
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
