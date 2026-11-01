@@ -17,7 +17,14 @@ import {
   CheckCircle2,
   Clock,
 } from "lucide-react";
-import { getWrongQuestions, toggleFocus, deleteWrongQuestion } from "../services/practiceService";
+import {
+  deleteWrongQuestion,
+  deleteWrongQuestions,
+  getFilterOptions,
+  getWrongQuestions,
+  toggleFocus,
+} from "../services/practiceService";
+import MathText from "../components/practice/MathText";
 
 const SUBJECT_LABELS = {
   math: "数学",
@@ -35,14 +42,16 @@ export default function WrongQuestionBookPage({ onRedo }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
-  const [statusFilter, setStatusFilter] = useState(""); // unresolved / reviewing / resolved
+  const [statusFilter, setStatusFilter] = useState(""); // unresolved / reviewing / favorite / resolved
   const [selectedIds, setSelectedIds] = useState([]);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [subjectFilter, setSubjectFilter] = useState("");
   const [kpFilter, setKpFilter] = useState("");
   const [timeFilter, setTimeFilter] = useState("all");
   const [filterSource, setFilterSource] = useState([]);
+  const [filterOptions, setFilterOptions] = useState(null);
   const [expandedIds, setExpandedIds] = useState([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -61,6 +70,7 @@ export default function WrongQuestionBookPage({ onRedo }) {
         : data.items;
       setQuestions(items);
       setTotal(statusFilter === "favorite" ? items.length : data.total);
+      setSelectedIds((prev) => prev.filter((id) => items.some((question) => question.id === id)));
     } catch (err) {
       console.error("加载错题失败:", err);
       setQuestions([]);
@@ -80,6 +90,14 @@ export default function WrongQuestionBookPage({ onRedo }) {
     }
   }, []);
 
+  const loadFilterOptions = useCallback(async () => {
+    try {
+      setFilterOptions(await getFilterOptions());
+    } catch (err) {
+      console.error("加载题库筛选项失败:", err);
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -87,6 +105,10 @@ export default function WrongQuestionBookPage({ onRedo }) {
   useEffect(() => {
     loadFilterSource();
   }, [loadFilterSource]);
+
+  useEffect(() => {
+    loadFilterOptions();
+  }, [loadFilterOptions]);
 
   const handleToggleFocus = async (id) => {
     const question = questions.find((item) => item.id === id);
@@ -126,8 +148,53 @@ export default function WrongQuestionBookPage({ onRedo }) {
     setTotal((prev) => Math.max(0, prev - 1));
   };
 
+  const handleBatchDelete = async () => {
+    if (selectedIds.length === 0 || batchDeleting) return;
+    const confirmed = window.confirm(`确定删除选中的 ${selectedIds.length} 道错题吗？`);
+    if (!confirmed) return;
+    setBatchDeleting(true);
+    const result = await deleteWrongQuestions(selectedIds);
+    setBatchDeleting(false);
+    if (!result.success) {
+      setLoadError(`批量删除失败：${result.reason || "请稍后重试"}`);
+      return;
+    }
+    setLoadError("");
+    const deleted = new Set(selectedIds);
+    const deletedCount = Number(result.data?.deleted) || deleted.size;
+    setQuestions((prev) => prev.filter((q) => !deleted.has(q.id)));
+    setFilterSource((prev) => prev.filter((q) => !deleted.has(q.id)));
+    setTotal((prev) => Math.max(0, prev - deletedCount));
+    setSelectedIds([]);
+  };
+
+  const launchRedo = (mistakeIds) => {
+    const selectedQuestions = questions.filter((question) => mistakeIds.includes(question.id));
+    const questionIds = [...new Set(
+      selectedQuestions
+        .map((question) => question.questionId)
+        .filter((questionId) => questionId !== undefined && questionId !== null && questionId !== "")
+    )];
+
+    if (selectedQuestions.length === 0) {
+      setLoadError("请先选择需要重做的错题");
+      return;
+    }
+    if (questionIds.length !== selectedQuestions.length) {
+      setLoadError("部分错题缺少对应的题目编号，暂时无法重做，请刷新错题本后再试");
+      return;
+    }
+
+    setLoadError("");
+    onRedo?.({
+      mistakeIds: selectedQuestions.map((question) => question.id),
+      questionIds,
+      questionCount: questionIds.length,
+    });
+  };
+
   const handleBatchRedo = () => {
-    onRedo?.(selectedIds);
+    launchRedo(selectedIds);
   };
 
   const toggleSelect = (id) => {
@@ -149,7 +216,7 @@ export default function WrongQuestionBookPage({ onRedo }) {
     { value: "unresolved", label: "未解决", icon: AlertCircle },
     { value: "reviewing", label: "复习中", icon: Clock },
     { value: "resolved", label: "已解决", icon: CheckCircle2 },
-    { value: "favorite", label: "收藏", icon: Star },
+    { value: "favorite", label: "已收藏", icon: Star },
   ];
 
   const reasonLabels = {
@@ -159,13 +226,19 @@ export default function WrongQuestionBookPage({ onRedo }) {
     method_wrong: { label: "方法错误", color: "bg-purple-50 text-purple-600" },
   };
 
-  const subjectOptions = useMemo(() => (
-    [...new Set(filterSource.map((question) => question.subject).filter(Boolean))]
+  const fallbackSubjectOptions = useMemo(() => (
+    [...new Set(filterSource
+      .map((question) => question.subject)
+      .filter((subject) => subject && subject !== "general"))]
       .sort((a, b) => (SUBJECT_LABELS[a] || a).localeCompare(SUBJECT_LABELS[b] || b, "zh-CN"))
       .map((value) => ({ value, label: SUBJECT_LABELS[value] || value }))
   ), [filterSource]);
 
-  const knowledgePointOptions = useMemo(() => (
+  const subjectOptions = filterOptions?.subjects?.length > 0
+    ? filterOptions.subjects
+    : fallbackSubjectOptions;
+
+  const fallbackKnowledgePointOptions = useMemo(() => (
     [...new Set(
       filterSource
         .filter((question) => !subjectFilter || question.subject === subjectFilter)
@@ -175,6 +248,13 @@ export default function WrongQuestionBookPage({ onRedo }) {
     )].sort((a, b) => a.localeCompare(b, "zh-CN"))
   ), [filterSource, subjectFilter]);
 
+  const syncedKnowledgePointOptions = subjectFilter
+    ? filterOptions?.knowledgePointsBySubject?.[subjectFilter]
+    : filterOptions?.knowledgePoints;
+  const knowledgePointOptions = syncedKnowledgePointOptions?.length > 0
+    ? syncedKnowledgePointOptions.map((point) => point.value)
+    : fallbackKnowledgePointOptions;
+
   return (
     <div className="max-w-5xl mx-auto">
       {/* 标题 & 统计 */}
@@ -183,17 +263,26 @@ export default function WrongQuestionBookPage({ onRedo }) {
           <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
             <BookOpen size={22} className="text-indigo-500" /> 错题本
           </h1>
-          <p className="text-sm text-slate-500 mt-1">共 {total} 道{statusFilter === "favorite" ? "收藏" : "错题"}</p>
+          <p className="text-sm text-slate-500 mt-1">共 {total} 道{statusFilter === "favorite" ? "已收藏错题" : "错题"}</p>
         </div>
 
         {/* 批量操作 */}
         {selectedIds.length > 0 && (
-          <button
-            onClick={handleBatchRedo}
-            className="flex items-center gap-1.5 px-4 py-2 bg-indigo-500 text-white rounded-xl text-sm font-medium hover:bg-indigo-600 cursor-pointer"
-          >
-            <RotateCcw size={15} /> 批量重做 ({selectedIds.length})
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleBatchRedo}
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-500 text-white rounded-xl text-sm font-medium hover:bg-indigo-600 cursor-pointer"
+            >
+              <RotateCcw size={15} /> 批量重做 ({selectedIds.length})
+            </button>
+            <button
+              onClick={handleBatchDelete}
+              disabled={batchDeleting}
+              className="flex items-center gap-1.5 px-4 py-2 bg-red-500 text-white rounded-xl text-sm font-medium hover:bg-red-600 disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+            >
+              <Trash2 size={15} /> {batchDeleting ? "删除中..." : `批量删除 (${selectedIds.length})`}
+            </button>
+          </div>
         )}
       </div>
 
@@ -286,7 +375,7 @@ export default function WrongQuestionBookPage({ onRedo }) {
       ) : questions.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <BookOpen size={48} className="mx-auto mb-3 opacity-40" />
-          <p className="text-lg font-medium">{statusFilter === "favorite" ? "暂无收藏" : "暂无错题"}</p>
+          <p className="text-lg font-medium">{statusFilter === "favorite" ? "暂无已收藏错题" : "暂无错题"}</p>
           <p className="text-sm mt-1">{statusFilter === "favorite" ? "点击题目右侧的星星即可收藏。" : "去练习几道题吧！"}</p>
         </div>
       ) : (
@@ -332,19 +421,20 @@ export default function WrongQuestionBookPage({ onRedo }) {
                     {/* 状态 */}
                     <span
                       className={`px-2 py-0.5 rounded-md text-xs font-medium
-                        ${q.status === "unresolved" ? "bg-red-50 text-red-500" : ""}
-                        ${q.status === "reviewing" ? "bg-amber-50 text-amber-500" : ""}
-                        ${q.status === "resolved" ? "bg-emerald-50 text-emerald-500" : ""}`}
+                        ${q.isKeyFocus ? "bg-amber-50 text-amber-500" : ""}
+                        ${!q.isKeyFocus && q.status === "unresolved" ? "bg-red-50 text-red-500" : ""}
+                        ${!q.isKeyFocus && q.status === "resolved" ? "bg-emerald-50 text-emerald-500" : ""}
+                        ${!q.isKeyFocus && q.status !== "unresolved" && q.status !== "resolved" ? "bg-slate-100 text-slate-500" : ""}`}
                     >
-                      {q.status === "unresolved" ? "未解决" : q.status === "reviewing" ? "复习中" : "已解决"}
+                      {q.isKeyFocus ? "已收藏" : q.status === "resolved" ? "已解决" : "未解决"}
                     </span>
                     {/* 时间 */}
                     <span className="text-xs text-slate-400">{q.createdAt?.slice(0, 10)}</span>
                   </div>
 
-                  <p className="text-sm text-slate-700 leading-relaxed line-clamp-2">
-                    {q.questionContent?.stem}
-                  </p>
+                  <div className="text-sm text-slate-700 leading-relaxed line-clamp-2">
+                    <MathText>{q.questionContent?.stem}</MathText>
+                  </div>
 
                   {/* 知识点 */}
                   <div className="flex items-center gap-1.5 mt-2 flex-wrap">
@@ -370,7 +460,7 @@ export default function WrongQuestionBookPage({ onRedo }) {
                     <Star size={16} fill={q.isKeyFocus ? "currentColor" : "none"} />
                   </button>
                   <button
-                    onClick={() => onRedo?.([q.id])}
+                    onClick={() => launchRedo([q.id])}
                     className="p-2 text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg cursor-pointer transition-colors"
                     title="重做"
                   >
@@ -395,7 +485,9 @@ export default function WrongQuestionBookPage({ onRedo }) {
               {expandedIds.includes(q.id) && (
                 <div className="ml-7 mt-3 rounded-xl border border-violet-100 bg-violet-50/60 p-4 text-sm">
                   <div className="font-medium text-violet-700">标准答案：{q.correctAnswer || "暂无"}</div>
-                  <p className="mt-2 leading-6 text-slate-600">{q.explanation || "这道题暂时没有录入解析。"}</p>
+                  <div className="mt-2 leading-6 text-slate-600">
+                    <MathText>{q.explanation || "这道题暂时没有录入解析。"}</MathText>
+                  </div>
                 </div>
               )}
             </div>

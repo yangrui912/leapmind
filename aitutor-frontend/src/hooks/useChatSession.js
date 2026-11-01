@@ -1,5 +1,52 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { askStream, interrupt, getSession } from '../services/chatService';
+import { askStream, interrupt, getSession, ChatError } from '../services/chatService';
+
+const LEGACY_STORAGE_KEY = 'chatSessionId';
+
+function normalizeStreamError(value = {}) {
+  const rawMessage = String(value.message || '生成失败');
+  if (/Arrearage|overdue-payment|account is in good standing/i.test(rawMessage)) {
+    return {
+      code: 3001,
+      message: 'AI 问答模型账户当前不可用（余额或额度状态异常），请联系管理员检查 DashScope 账户。',
+    };
+  }
+  return {
+    code: value.code || undefined,
+    message: rawMessage,
+  };
+}
+
+/**
+ * 每个学习场景拥有独立会话：同一题/同一堂课可在刷新后恢复，
+ * 但做题、讲题、讲课、备课之间绝不能互相复用上下文。
+ */
+function getSessionResourceId(sceneType, context = {}) {
+  return {
+    doing_exercise: context.questionId,
+    explaining: context.wrongQuestionId,
+    teaching: context.lectureId,
+    lesson_prep: context.prepId,
+  }[sceneType] ?? null;
+}
+
+function getSessionStorageKey(userId, sceneType, resourceId) {
+  return `chatSessionId:${userId ?? 'anonymous'}:${sceneType || 'general_qa'}:${resourceId ?? 'default'}`;
+}
+
+function isMatchingSession(session, userId, sceneType, resourceId) {
+  if (!session || String(session.userId) !== String(userId) || session.sceneType !== sceneType) return false;
+
+  const keyByScene = {
+    doing_exercise: 'questionId',
+    explaining: 'wrongQuestionId',
+    teaching: 'lectureId',
+    lesson_prep: 'prepId',
+  };
+  const resourceKey = keyByScene[sceneType];
+
+  return !resourceKey || String(session.context?.[resourceKey] ?? '') === String(resourceId ?? '');
+}
 
 /**
  * ChatPanel 对话状态管理 Hook
@@ -21,18 +68,22 @@ import { askStream, interrupt, getSession } from '../services/chatService';
  *   messages: Array<{role:string, content:string, isStreaming?:boolean, error?:boolean}>,
  *   isGenerating: boolean,
  *   sessionId: string|null,
- *   error: string|null,
+ *   error: { message:string, code?:number }|null,
  *   send: (text:string) => void,
  *   abort: () => void,
  *   retry: () => void,
  *   clear: () => void,
  * }}
  */
-export function useChatSession({ sceneType, context, userId, autoRestore = true }) {
+export function useChatSession({ sceneType, context, userId, autoRestore = true, onAssistantComplete }) {
   const [messages, setMessages] = useState([]);
-  const [isGenerating, setIsGenerating] = useState(false);
+  // 对话状态机（对齐 M7 对接文档）：idle / thinking / content / error / interrupted
+  const [phase, setPhase] = useState('idle');
   const [sessionId, setSessionId] = useState(null);
+  const [sessionStorageKey, setSessionStorageKey] = useState(null);
   const [error, setError] = useState(null);
+  const resourceId = getSessionResourceId(sceneType, context);
+  const storageKey = getSessionStorageKey(userId, sceneType, resourceId);
 
   // 保存最后一次请求参数，用于 retry
   const lastQuestionRef = useRef(null);
@@ -42,15 +93,41 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
   const bufferRef = useRef('');
   // 同步锁，防止 send 被快速双击绕过 state 检查
   const isGeneratingRef = useRef(false);
+  // 当前正在生成的问题文本（本地智能去重：连点相同问题直接忽略，不重复调 AI）
+  const pendingQuestionRef = useRef(null);
+  const onAssistantCompleteRef = useRef(onAssistantComplete);
+
+  useEffect(() => {
+    onAssistantCompleteRef.current = onAssistantComplete;
+  }, [onAssistantComplete]);
 
   // -------- 初始化：尝试恢复会话 --------
   useEffect(() => {
-    if (!autoRestore) return;
-    const savedSessionId = localStorage.getItem('chatSessionId');
+    let cancelled = false;
+    setMessages([]);
+    setSessionId(null);
+    setSessionStorageKey(null);
+    setError(null);
+
+    if (!autoRestore) {
+      // 临时会话模式：进入场景即丢弃该资源曾保存的浏览器会话引用。
+      // 后端历史仍可用于审计，但后续请求不会再携带旧 sessionId。
+      localStorage.removeItem(storageKey);
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+      return () => { cancelled = true; };
+    }
+
+    const savedSessionId = localStorage.getItem(storageKey);
     if (savedSessionId) {
       getSession(savedSessionId)
         .then(session => {
+          if (cancelled) return;
+          if (!isMatchingSession(session, userId, sceneType, resourceId)) {
+            localStorage.removeItem(storageKey);
+            return;
+          }
           setSessionId(session.sessionId);
+          setSessionStorageKey(storageKey);
           const restored = (session.messages || []).map(msg => ({
             role: msg.role,
             content: msg.content,
@@ -59,58 +136,111 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
         })
         .catch(() => {
           // 恢复失败，清除旧 session
-          localStorage.removeItem('chatSessionId');
+          localStorage.removeItem(storageKey);
         });
     }
-  }, [autoRestore]);
+    return () => { cancelled = true; };
+  }, [autoRestore, storageKey, userId, sceneType, resourceId]);
 
   // -------- 持久化 sessionId --------
   useEffect(() => {
-    if (sessionId) {
-      localStorage.setItem('chatSessionId', sessionId);
+    if (autoRestore && sessionId && sessionStorageKey === storageKey) {
+      localStorage.setItem(storageKey, sessionId);
     }
-  }, [sessionId]);
+  }, [autoRestore, sessionId, sessionStorageKey, storageKey]);
 
-  // -------- 拦截流 chunk，逐字追加到最后一条 assistant 消息 --------
-  const processChunk = useCallback((chunk) => {
-    if (chunk.type === 'content' && chunk.chunk) {
-      bufferRef.current += chunk.chunk;
-      const captured = bufferRef.current; // ⚠️ 捕获快照，setMessages updater 异步执行时 ref 可能已被改
-      setMessages(prev => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last && last.isStreaming) {
-          copy[copy.length - 1] = { ...last, content: captured };
-        }
-        return copy;
-      });
-    } else if (chunk.type === 'done') {
-      // 标记流式结束
-      const captured = bufferRef.current; // ⚠️ 必须捕获！下面立即清空 ref
-      isGeneratingRef.current = false;
-      setIsGenerating(false);
-      setMessages(prev => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last && last.isStreaming) {
-          copy[copy.length - 1] = { role: 'assistant', content: captured };
-        }
-        return copy;
-      });
-      bufferRef.current = '';
+  // -------- 立即切断当前 SSE 流（⚠️ 致命切断点：终端事件必须主动 cancel） --------
+  // fetch 本身不会自动重连，天然安全；此处统一封装，若未来切换 @microsoft/fetch-event-source
+  // 也必须在 done/error/interrupted 终端事件处手动 abort，防止重连打挂后端限流器。
+  const stopStream = useCallback(() => {
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch { /* ignore */ }
+      abortRef.current = null;
     }
   }, []);
 
+  // -------- 结束生成（清同步锁 + 置状态机） --------
+  const finishGenerating = useCallback((nextPhase) => {
+    isGeneratingRef.current = false;
+    pendingQuestionRef.current = null;
+    setPhase(nextPhase);
+  }, []);
+
+  // -------- 收尾最后一条 isStreaming 消息（保留已生成内容） --------
+  const finalizeMessage = useCallback((captured, { markError = false } = {}) => {
+    setMessages(prev => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      if (last && last.isStreaming) {
+        copy[copy.length - 1] = markError
+          ? { role: 'assistant', content: captured || '生成失败', error: true }
+          : { role: 'assistant', content: captured };
+      }
+      return copy;
+    });
+  }, []);
+
+  // -------- 移除空占位（内容为空时不用保留） --------
+  const dropEmptyPlaceholder = useCallback(() => {
+    setMessages(prev => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      if (last && last.isStreaming && !bufferRef.current) {
+        copy.pop();
+      }
+      return copy;
+    });
+  }, []);
+
+  // -------- 拦截流 chunk，逐字追加到最后一条 assistant 消息 --------
+  const applyContent = useCallback((chunk) => {
+    bufferRef.current += chunk.chunk;
+    const captured = bufferRef.current; // ⚠️ 捕获快照，setMessages updater 异步执行时 ref 可能已被改
+    setMessages(prev => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      if (last && last.isStreaming) {
+        copy[copy.length - 1] = { ...last, content: captured };
+      }
+      return copy;
+    });
+  }, []);
+
   // -------- 发送消息 --------
+  // 返回值：undefined=已正常发送 | 'duplicate'=与进行中问题相同（本地去重，不重复调 AI） | 'busy'=生成中提交了不同问题
   const send = useCallback((text, { isRetry = false } = {}) => {
-    if (!text.trim() || isGeneratingRef.current) return;
+    const trimmed = (text || '').trim();
+    if (!trimmed) return undefined;
+
+    // 冻结“点击发送这一刻”的场景数据。课堂可能在 SSE 返回前翻页，
+    // 但本轮问题必须始终按发问页处理，不能读取后续页面的 context。
+    const requestContext = context && typeof context === 'object'
+      ? { ...context }
+      : {};
+
+    // 生成中：本地智能去重（允许连点，但不重复调 AI，省 token）
+    if (isGeneratingRef.current) {
+      if (pendingQuestionRef.current && pendingQuestionRef.current === trimmed) {
+        return 'duplicate'; // 相同问题连点 → 忽略，等待当前回答
+      }
+      return 'busy'; // 不同问题 → 提示等待，避免并发流打挂限流器
+    }
+
     setError(null);
-    lastQuestionRef.current = text;
+    lastQuestionRef.current = trimmed;
+    pendingQuestionRef.current = trimmed;
     isGeneratingRef.current = true;
 
     // retry 时不重复追加用户消息
     if (!isRetry) {
-      const userMsg = { role: 'user', content: text };
+      const slideNumber = requestContext.currentSlide ?? requestContext.slide;
+      const userMsg = {
+        role: 'user',
+        content: trimmed,
+        contextLabel: sceneType === 'teaching' && slideNumber != null
+          ? `PPT 第 ${slideNumber} 页`
+          : undefined,
+      };
       setMessages(prev => [...prev, userMsg]);
     }
 
@@ -118,18 +248,17 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
     const assistantMsg = { role: 'assistant', content: '', isStreaming: true };
     setMessages(prev => [...prev, assistantMsg]);
     bufferRef.current = '';
-    setIsGenerating(true);
+    setPhase('thinking'); // 状态机 → thinking
 
     // 启动流
     const stream = askStream({
       userId,
       sessionId,
-      question: text,
+      question: trimmed,
       sceneType,
-      context,
+      context: requestContext,
     });
 
-    // 保存 sessionId（若后端返回新的）
     // 通过 reader 消费流
     const reader = stream.getReader();
     abortRef.current = {
@@ -142,79 +271,84 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
     function read() {
       reader.read().then(({ done, value }) => {
         if (done) {
-          isGeneratingRef.current = false;
-          setIsGenerating(false);
+          // 流自然结束（无终端事件，如连接被服务端正常关闭）
+          finishGenerating('idle');
           return;
         }
         if (value && value.type) {
-          // 如果是 done 事件，提取 sessionId
-          if (value.type === 'done' && value.sessionId) {
+          // ✅ SessionID 闭环：任意事件（thinking/content/done/...）都可能携带 sessionId，
+          //    收到即保存，后续追问必须携带该 ID
+          if (value.sessionId) {
             setSessionId(value.sessionId);
+            setSessionStorageKey(storageKey);
           }
-          // 后端推送错误事件
-          if (value.type === 'error') {
-            setError(value.message || '生成失败');
-            isGeneratingRef.current = false;
-            setIsGenerating(false);
-            const captured = bufferRef.current; // ⚠️ 捕获快照
-            // 移除占位 assistant 消息（内容为空）
-            setMessages(prev => {
-              const copy = [...prev];
-              const last = copy[copy.length - 1];
-              if (last && last.isStreaming && !captured) {
-                copy.pop();
-              } else if (last && last.isStreaming) {
-                copy[copy.length - 1] = { role: 'assistant', content: captured };
-              }
-              return copy;
-            });
+
+          if (value.type === 'thinking') {
+            // thinking 态：骨架屏/Loading（ChatPanel 渲染）
+            setPhase('thinking');
+          } else if (value.type === 'content') {
+            setPhase('content');
+            applyContent(value);
+          } else if (value.type === 'done') {
+            // ⚠️ 终端事件：立即切断连接（防重连打挂限流器）+ 收尾消息
+            stopStream();
+            const captured = bufferRef.current; // ⚠️ 必须捕获！下面立即清空 ref
+            finishGenerating('idle');
+            finalizeMessage(captured);
+            if (captured) onAssistantCompleteRef.current?.(captured);
             bufferRef.current = '';
-            return;
+            return; // 终端事件不再继续 read()
+          } else if (value.type === 'error') {
+            // ⚠️ 终端事件：立即切断连接 + 按 code 差异化处理
+            stopStream();
+            const captured = bufferRef.current;
+            finishGenerating('error');
+            if (!captured) dropEmptyPlaceholder();
+            else finalizeMessage(captured);
+            setError(normalizeStreamError(value));
+            bufferRef.current = '';
+            return; // 终端事件不再继续 read()
+          } else if (value.type === 'interrupted') {
+            // ⚠️ 终端事件：立即切断连接 + 保留半成品文本
+            stopStream();
+            const captured = bufferRef.current;
+            finishGenerating('interrupted');
+            finalizeMessage(captured);
+            bufferRef.current = '';
+            return; // 终端事件不再继续 read()
           }
-          processChunk(value);
         }
+        // 非终端事件（thinking/content/未知）继续消费后续 chunk
         read();
       }).catch((err) => {
         // reader cancel（用户主动打断）走 abort 路径，不会进这里
         // 这里是网络/解析异常
         const captured = bufferRef.current; // ⚠️ 捕获快照
-        isGeneratingRef.current = false;
-        setIsGenerating(false);
-        setError(err?.message || '连接异常，请重试');
-        // 保留已生成内容
-        setMessages(prev => {
-          const copy = [...prev];
-          const last = copy[copy.length - 1];
-          if (last && last.isStreaming) {
-            copy[copy.length - 1] = {
-              role: 'assistant',
-              content: captured || '生成失败',
-              error: true,
-            };
-          }
-          return copy;
+        finishGenerating('error');
+        const isChatError = err instanceof ChatError || err?.code;
+        setError({
+          message: err?.message || '连接异常，请重试',
+          code: isChatError ? (err.code || 1001) : undefined,
         });
+        // 保留已生成内容
+        finalizeMessage(captured, { markError: true });
         bufferRef.current = '';
       });
     }
     read();
-  }, [userId, sessionId, sceneType, context, processChunk]);
+  }, [userId, sessionId, sceneType, context, storageKey, applyContent, dropEmptyPlaceholder, finalizeMessage, finishGenerating, stopStream]);
 
-  // -------- 打断 --------
+  // -------- 打断（用户点击"停止生成"） --------
   const abort = useCallback(() => {
-    // 取消流 reader
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
-    // 通知后端
+    // 1. 切断本地 SSE 流
+    stopStream();
+    // 2. 通知后端取消 Flux 订阅
     if (sessionId) {
       interrupt(sessionId).catch(() => { /* ignore */ });
     }
-    // 保留已生成内容，去掉 streaming 标记
+    // 3. 保留已生成内容，状态机 → interrupted
     const captured = bufferRef.current; // ⚠️ 捕获快照
-    isGeneratingRef.current = false;
-    setIsGenerating(false);
+    finishGenerating('interrupted');
     setMessages(prev => {
       const copy = [...prev];
       const last = copy[copy.length - 1];
@@ -227,7 +361,7 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
       return copy;
     });
     bufferRef.current = '';
-  }, [sessionId]);
+  }, [sessionId, stopStream, finishGenerating]);
 
   // -------- 重试 --------
   const retry = useCallback(() => {
@@ -247,21 +381,25 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true 
   // -------- 清空对话 --------
   const clear = useCallback(() => {
     // 若正在生成，先打断流
-    if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
-    }
+    stopStream();
     isGeneratingRef.current = false;
-    setIsGenerating(false);
+    setPhase('idle');
     setMessages([]);
     setSessionId(null);
+    setSessionStorageKey(null);
     setError(null);
     bufferRef.current = '';
-    localStorage.removeItem('chatSessionId');
-  }, []);
+    localStorage.removeItem(storageKey);
+    // 旧版全局键可能指向任意模块的历史；绝不迁移，直接丢弃。
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  }, [storageKey, stopStream]);
+
+  // isGenerating 派生自状态机（thinking/content 视为正在生成），保持对外兼容
+  const isGenerating = phase === 'thinking' || phase === 'content';
 
   return {
     messages,
+    phase,
     isGenerating,
     sessionId,
     error,

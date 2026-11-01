@@ -70,7 +70,7 @@ export function buildLearningEvent({
     data,
   }
   if (sessionId != null && sessionId !== '') event.sessionId = String(sessionId)
-  if (kpId != null) event.kpId = Number(kpId)
+  if (Number.isSafeInteger(Number(kpId)) && Number(kpId) > 0) event.kpId = Number(kpId)
   if (traceId != null && traceId !== '') event.traceId = String(traceId)
   return event
 }

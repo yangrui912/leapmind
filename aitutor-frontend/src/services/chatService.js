@@ -6,15 +6,27 @@
  *   POST /api/conversation/interrupt    打断生成
  *   GET  /api/conversation/sessions/{id} 会话恢复
  *
- * ⚠️ 当前为 Mock 实现，标记 TODO-MOCK 处待后端就绪后替换
+ * ✅ 已对接真实后端（backend-M7 ConversationController，SSE 流式）
  */
 
 import { getToken } from '../utils/tokenManager';
 
-// ============================================================
-// TODO-MOCK: 替换为真实后端 URL
-// const API_BASE = import.meta.env.VITE_API_BASE || '';
-// ============================================================
+/**
+ * 结构化错误，携带错误码便于前端差异化处理
+ *
+ * 错误码对应后端 exception/BizErrorCode.java：
+ *   1001 RATE_LIMITED       — 限流，不显示重试
+ *   1002 QUESTION_DUPLICATE — 重复提问（问题正在思考中），不显示重试
+ *   1003 SERVICE_DEGRADED   — 降级，显示重试
+ *   2001 AI_TIMEOUT         — 超时，显示重试
+ */
+export class ChatError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'ChatError';
+    this.code = code;
+  }
+}
 
 /**
  * 构建带认证的请求头
@@ -45,120 +57,74 @@ function buildAuthHeaders(extra = {}) {
  *
  * @returns {ReadableStream} 流式响应，每个 chunk 为 SSE data 行解析后的 JSON 对象
  *
- * ⚠️ 对接后端步骤：
- *    1. 取消 import.meta.env.VITE_CHAT_MOCK 判断，直接走真实分支
- *    2. 确认后端 SSE event 格式（event: message / event: interrupt / event: error）
- *    3. 确认 content chunk 的 JSON 结构（{type, chunk, index} 或 {type, content, ...}）
+ * SSE 事件格式（后端 ConversationService 输出）：
+ *   data: {"type":"thinking","content":"","sessionId":"..."}
+ *   data: {"type":"content","chunk":"文","index":0}
+ *   data: {"type":"done","callId":"...","sessionId":"...","tokenUsage":{...}}
+ *   data: {"type":"error","message":"..."}
  */
 export function askStream({ userId, sessionId, question, sceneType, context }) {
-  // ============================================================
-  // TODO-MOCK: 整段替换为真实 fetch + SSE 解析
-  // ============================================================
-  const useMock = import.meta.env.VITE_CHAT_MOCK !== 'false';
+  // ---- 真实 SSE 调用：返回 ReadableStream，内部异步 fetch + pipe SSE ----
+  let fetchReader = null;
 
-  if (!useMock) {
-    // ---- 真实 SSE 调用 ----
-    // 返回 ReadableStream，内部异步 fetch + pipe SSE
-    let fetchReader = null;
-
-    return new ReadableStream({
-      async start(controller) {
-        try {
-          const url = `/api/conversation/ask`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: buildAuthHeaders({
-              'Accept': 'text/event-stream',
-            }),
-            body: JSON.stringify({
-              userId,
-              sessionId,
-              question,
-              sceneType,
-              context: context || {},
-              inputType: 'text',
-              attachmentUrls: [],
-            }),
-          });
-          if (!res.ok) {
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        const url = `/api/conversation/ask`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: buildAuthHeaders({
+            'Accept': 'text/event-stream',
+          }),
+          body: JSON.stringify({
+            userId,
+            sessionId,
+            question,
+            sceneType,
+            context: context || {},
+            inputType: 'text',
+            attachmentUrls: [],
+          }),
+        });
+        if (!res.ok) {
+          if (res.status === 429) {
+            controller.error(new ChatError(1001, '您提问的频率有点快，请稍等片刻后再试。'));
+          } else if (res.status === 503) {
+            controller.error(new ChatError(1003, '服务暂时降级，请稍后重新尝试。'));
+          } else {
             controller.error(new Error(`SSE error: ${res.status}`));
+          }
+          return;
+        }
+        fetchReader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        while (true) {
+          const { done, value } = await fetchReader.read();
+          if (done) {
+            controller.close();
             return;
           }
-          fetchReader = res.body.getReader();
-          const decoder = new TextDecoder('utf-8');
-          let buffer = '';
-          while (true) {
-            const { done, value } = await fetchReader.read();
-            if (done) {
-              controller.close();
-              return;
-            }
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            for (const line of lines) {
-              if (line.startsWith('data:')) {
-                const data = line.slice(5).trim();
-                if (data && data !== '[DONE]') {
-                  try { controller.enqueue(JSON.parse(data)); } catch { /* skip malformed */ }
-                }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              const data = line.slice(5).trim();
+              if (data && data !== '[DONE]') {
+                try { controller.enqueue(JSON.parse(data)); } catch { /* skip malformed */ }
               }
             }
           }
-        } catch (err) {
-          controller.error(err);
         }
-      },
-      cancel() {
-        if (fetchReader) {
-          try { fetchReader.cancel(); } catch { /* ignore */ }
-        }
-      },
-    });
-  }
-
-  // ---- Mock 实现 ----
-  // eslint-disable-next-line no-console
-  console.log(`[ChatPanel Mock] askStream: sceneType=${sceneType} question="${question.slice(0, 30)}..."`);
-
-  const mockSessionId = sessionId || `mock-sess-${Date.now()}`;
-  const mockReply = buildMockReply(sceneType, question);
-
-  let timer = null;
-  let aborted = false;
-
-  return new ReadableStream({
-    start(controller) {
-      let index = 0;
-
-      function push() {
-        if (aborted) return;
-        if (index < mockReply.length) {
-          controller.enqueue({
-            type: 'content',
-            chunk: mockReply[index],
-            index,
-          });
-          index++;
-          const delay = 30 + Math.random() * 50;
-          timer = setTimeout(push, delay);
-        } else {
-          controller.enqueue({
-            type: 'done',
-            callId: `mock-call-${Date.now()}`,
-            sessionId: mockSessionId,
-            tokenUsage: { input: question.length, output: mockReply.length },
-          });
-          controller.close();
-        }
+      } catch (err) {
+        controller.error(err);
       }
-
-      controller.enqueue({ type: 'thinking', content: '' });
-      timer = setTimeout(push, 400);
     },
     cancel() {
-      aborted = true;
-      if (timer) { clearTimeout(timer); timer = null; }
+      if (fetchReader) {
+        try { fetchReader.cancel(); } catch { /* ignore */ }
+      }
     },
   });
 }
@@ -169,23 +135,12 @@ export function askStream({ userId, sessionId, question, sceneType, context }) {
  * @param {string} sessionId
  * @returns {Promise<void>}
  *
- * ⚠️ 对接后端步骤：
- *    取消 import.meta.env.VITE_CHAT_MOCK 判断
  */
 export async function interrupt(sessionId) {
-  const useMock = import.meta.env.VITE_CHAT_MOCK !== 'false';
-
-  if (!useMock) {
-    await fetch(`/api/conversation/interrupt?sessionId=${sessionId}`, {
-      method: 'POST',
-      headers: buildAuthHeaders(),
-    });
-    return;
-  }
-
-  // Mock: 无操作
-  // eslint-disable-next-line no-console
-  console.log(`[ChatPanel Mock] interrupt sessionId=${sessionId}`);
+  await fetch(`/api/conversation/interrupt?sessionId=${sessionId}`, {
+    method: 'POST',
+    headers: buildAuthHeaders(),
+  });
 }
 
 /**
@@ -194,83 +149,11 @@ export async function interrupt(sessionId) {
  * @param {string} sessionId
  * @returns {Promise<{ sessionId:string, sceneType:string, context:Object, messages:Array }>}
  *
- * ⚠️ 对接后端步骤：
- *    取消 import.meta.env.VITE_CHAT_MOCK 判断
  */
 export async function getSession(sessionId) {
-  const useMock = import.meta.env.VITE_CHAT_MOCK !== 'false';
-
-  if (!useMock) {
-    const res = await fetch(`/api/conversation/sessions/${sessionId}`, {
-      headers: buildAuthHeaders(),
-    });
-    if (!res.ok) throw new Error(`Session error: ${res.status}`);
-    return res.json();
-  }
-
-  // Mock: 返回空会话
-  // eslint-disable-next-line no-console
-  console.log(`[ChatPanel Mock] getSession sessionId=${sessionId}`);
-  return {
-    sessionId,
-    sceneType: 'general_qa',
-    context: {},
-    messages: [],
-  };
-}
-
-// ============================================================
-// Mock 工具
-// ============================================================
-
-/**
- * Mock: 根据场景生成模拟回复
- */
-function buildMockReply(sceneType, question) {
-  const templates = {
-    doing_exercise: [
-      '这道题考察的是',
-      '我们来看一下已知条件：',
-      question.slice(0, 10) + '...',
-      '首先，分析题目类型，',
-      '然后回忆相关公式和定理，',
-      '接着代入已知数据，',
-      '经过计算得出答案。',
-    ],
-    explaining: [
-      '好的，我来给你讲解这道题。',
-      '先看题目问的是什么？',
-      '这道题的解题关键是：',
-      '第一步，理清已知条件；',
-      '第二步，套用正确的公式；',
-      '第三步，仔细计算；',
-      '最后检验答案是否合理。',
-    ],
-    teaching: [
-      '这是一个很好的问题！',
-      '我们结合刚才讲的内容来理解：',
-      '回顾一下这个知识点：',
-      '举个类似的例子帮助理解：',
-      '所以总结来说就是：',
-      '你理解了吗？可以继续提问。',
-    ],
-    lesson_prep: [
-      '关于这节课的设计，',
-      '我建议按照以下思路：',
-      '教学目标应该聚焦在：',
-      '重难点方面需要注意：',
-      '可以设计一个互动环节来巩固：',
-    ],
-    general_qa: [
-      '很好的问题！',
-      '让我来帮你分析一下：',
-      '从几个角度来看：',
-      '第一，',
-      '第二，',
-      '综上所述，',
-      '还有什么想进一步了解的吗？',
-    ],
-  };
-
-  return templates[sceneType] || templates.general_qa;
+  const res = await fetch(`/api/conversation/sessions/${sessionId}`, {
+    headers: buildAuthHeaders(),
+  });
+  if (!res.ok) throw new Error(`Session error: ${res.status}`);
+  return res.json();
 }

@@ -79,4 +79,18 @@ describe('统一画像事件服务', () => {
     expect(event.data).toEqual({ lectureId: 'lecture-7', chapterId: 'ch2', action: 'replay' });
     expect(event.type).toBeUndefined();
   });
+
+  test('非数字知识点ID不写入标准事件顶层', () => {
+    const event = buildLectureInteractionEvent({
+      userId: 23,
+      lectureId: 'lecture-7',
+      chapterId: 'ch1',
+      action: 'complete',
+      interactionId: 'session-9:4',
+      sessionId: 'session-9',
+      kpId: 'fallback-pythagorean',
+    });
+
+    expect(event.kpId).toBeUndefined();
+  });
 });

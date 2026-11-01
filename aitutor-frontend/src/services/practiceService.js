@@ -8,13 +8,17 @@
  */
 
 import { request } from './api';
+import {
+  SUBJECT_MAP,
+  SUBJECT_REVERSE,
+  transformKnowledgePointOptions,
+  transformKnowledgePointsBySubject,
+  transformSubjectOptions,
+} from '../utils/practiceSubjects';
 
 // ============================================================================
 // 常量映射表
 // ============================================================================
-
-const SUBJECT_MAP = { '数学': 'math', '英语': 'english', '计算机': 'computer', '语文': 'chinese', '物理': 'physics', '化学': 'chemistry', '生物': 'biology', '通用': 'general' };
-const SUBJECT_REVERSE = Object.fromEntries(Object.entries(SUBJECT_MAP).map(([k, v]) => [v, k]));
 
 const TYPE_BE_TO_FE = { 'SINGLE_CHOICE': 'single_choice', 'MULTIPLE_CHOICE': 'multi_choice', 'FILL_BLANK': 'fill_blank', 'SHORT_ANSWER': 'short_answer' };
 const TYPE_FE_TO_BE = Object.fromEntries(Object.entries(TYPE_BE_TO_FE).map(([k, v]) => [v, k]));
@@ -97,7 +101,16 @@ function selectSessionQuestions(items, count, mixedSubjects) {
  * GET /filters → 前端 filterOptions
  */
 function transformFilterOptions(data) {
-  const subjects = (data.subjects || []).map(s => ({ value: SUBJECT_MAP[s] || 'general', label: s }));
+  const subjects = transformSubjectOptions(data.subjects);
+  const practiceSubjects = transformSubjectOptions(data.practiceSubjects || data.subjects);
+  const knowledgePoints = transformKnowledgePointOptions(data.knowledgePoints);
+  const practiceKnowledgePoints = transformKnowledgePointOptions(
+    data.practiceKnowledgePoints || data.knowledgePoints
+  );
+  const knowledgePointsBySubject = transformKnowledgePointsBySubject(data.knowledgePointsBySubject);
+  const practiceKnowledgePointsBySubject = transformKnowledgePointsBySubject(
+    data.practiceKnowledgePointsBySubject || data.knowledgePointsBySubject
+  );
   const grades = (data.gradeLevels || []).map(g => ({ value: g, label: g }));
   // 后端返回扁平章节列表，前端期望按科目分组；此处铺到所有科目 + general 兜底
   const chapterItems = (data.chapters || []).map(ch => ({ value: ch, label: ch }));
@@ -109,7 +122,18 @@ function transformFilterOptions(data) {
     return { value: fe || t.toLowerCase(), label: (fe && typeLabels[fe]) || t };
   });
   const difficulties = (data.difficulties || []).map(d => frontendDifficulty(d));
-  return { subjects, grades, chapters, types, difficulties };
+  return {
+    subjects,
+    practiceSubjects,
+    knowledgePoints,
+    practiceKnowledgePoints,
+    knowledgePointsBySubject,
+    practiceKnowledgePointsBySubject,
+    grades,
+    chapters,
+    types,
+    difficulties,
+  };
 }
 
 /**
@@ -309,6 +333,7 @@ export async function getQuestions(params = {}) {
     if (params.subject) beParams.subject = SUBJECT_REVERSE[params.subject] || params.subject;
     if (params.grade) beParams.gradeLevel = params.grade;
     if (params.chapter) beParams.chapter = params.chapter;
+    if (params.knowledgePoint) beParams.knowledgePoint = params.knowledgePoint;
     if (params.type) beParams.questionType = TYPE_FE_TO_BE[params.type] || params.type;
     if (params.difficulty) beParams.difficulty = DIFF_FE_TO_BE[params.difficulty] || params.difficulty;
     if (params.keyword) beParams.keyword = params.keyword;
@@ -325,6 +350,9 @@ export async function getQuestions(params = {}) {
     if (params.subject) list = list.filter(q => q.subject === params.subject);
     if (params.grade) list = list.filter(q => q.grade === params.grade);
     if (params.chapter) list = list.filter(q => q.chapter === params.chapter);
+    if (params.knowledgePoint) {
+      list = list.filter(q => q.knowledgePoints?.some((point) => point.name === params.knowledgePoint));
+    }
     if (params.type) list = list.filter(q => q.type === params.type);
     if (params.difficulty) list = list.filter(q => q.difficulty === Number(params.difficulty));
     if (params.keyword) list = list.filter(q => (q.content?.stem || '').includes(params.keyword) || q.chapter?.includes(params.keyword));
@@ -413,7 +441,9 @@ export async function submitAnswer(params = {}) {
   }
 
   let userAnswer = '';
-  if (typeof params.answer?.selected === 'string') {
+  if (typeof params.answer === 'string') {
+    userAnswer = params.answer;
+  } else if (typeof params.answer?.selected === 'string') {
     userAnswer = params.answer.selected;
   } else if (Array.isArray(params.answer?.selected)) {
     userAnswer = params.answer.selected.join(',');
@@ -425,6 +455,7 @@ export async function submitAnswer(params = {}) {
     userAnswer,
     durationSeconds: params.timeSpent || 0,
     mode: params.mode || 'SEQUENTIAL',
+    sessionId: params.sessionId || undefined,
   };
 
   try {
@@ -450,14 +481,14 @@ export async function submitAnswer(params = {}) {
 export async function getRanking(type = 'daily', limit = 20) {
   void type;
   try {
-    const res = await request('/api/practice/leaderboards');
+    const res = await request('/api/practice/leaderboards' + buildQuery({ type }));
     const list = transformRanking(unwrap(res));
     return list.slice(0, limit);
   } catch (err) {
     if (!PRACTICE_MOCK_ENABLED) throw persistentApiError('加载排行榜', err);
     console.warn('[M1] getRanking 后端不可用，使用 Mock:', err.message);
     await _loadMock();
-    return (_mockRanking?.daily || []).slice(0, limit);
+    return (_mockRanking?.[type] || _mockRanking?.daily || []).slice(0, limit);
   }
 }
 
@@ -467,11 +498,12 @@ export async function getRanking(type = 'daily', limit = 20) {
 export async function dailyCheckin() {
   const res = await request('/api/practice/checkin', { method: 'POST', body: '{}' });
   const data = unwrap(res);
+  const status = data.status || {};
   return {
-    pointsEarned: data.points || 0,
-    totalPoints: 0,
-    streakDays: 0,
-    alreadyChecked: data.alreadyChecked || false,
+    pointsEarned: data.points ?? 0,
+    totalPoints: status.totalPoints ?? data.totalPoints ?? 0,
+    streakDays: status.streakDays ?? data.streakDays ?? 0,
+    alreadyChecked: Boolean(data.alreadyChecked),
   };
 }
 
@@ -491,6 +523,73 @@ export async function getCheckinStatus() {
     console.warn('[M1] getCheckinStatus 后端不可用:', err.message);
     return { checkedToday: false, streakDays: 0, totalPoints: 0 };
   }
+}
+
+/**
+ * 获取当前登录用户已到期的 AI 复习提醒。
+ * 用户身份由后端从 JWT 中读取，前端不传 userId。
+ */
+export async function getReviewReminders() {
+  const res = await request('/api/practice/review-reminders');
+  return (unwrap(res) || []).map((item) => ({
+    id: item.id,
+    courseId: item.courseId || '',
+    type: item.reminderType || 'REVIEW',
+    content: item.content || '知识点复习',
+    scheduledDate: item.scheduledDate || '',
+    priority: Number(item.priority) || 0,
+    isReviewed: Number(item.isReviewed) === 1,
+  }));
+}
+
+/**
+ * 完成一条 AI 复习提醒。
+ */
+export async function completeReviewReminder(reminderId, notes = '') {
+  const res = await request(`/api/practice/review-reminders/${reminderId}/complete`, {
+    method: 'POST',
+    body: JSON.stringify({ notes }),
+  });
+  return unwrap(res);
+}
+
+/**
+ * 获取薄弱点模块给当前登录用户生成的练习建议。
+ * M3 推荐接口需要显式传入当前登录用户的 userId。
+ */
+export async function getWeakPointRecommendations(params = {}) {
+  const userId = Number(params.userId);
+  if (!Number.isSafeInteger(userId) || userId <= 0) {
+    throw new Error('当前登录信息缺少有效的 userId，请重新登录后再试');
+  }
+  const query = { userId };
+  if (params.subject) query.subject = SUBJECT_REVERSE[params.subject] || params.subject;
+  if (params.knowledgePoint) query.knowledgePoint = params.knowledgePoint;
+  query.count = Math.max(1, Math.min(20, Number(params.count) || 5));
+  const res = await request('/api/exercises/recommend' + buildQuery(query));
+  return (unwrap(res) || []).map((item) => ({
+    exerciseId: item.exerciseId || '',
+    knowledgePoint: item.knowledgePoint || '',
+    subject: SUBJECT_MAP[item.subject] || item.subject || '',
+    sourceType: item.sourceType || '',
+    priority: Number(item.priority) || 0,
+  })).filter((item) => item.knowledgePoint);
+}
+
+/**
+ * 通知 M6 当前练习会话已完成，用于更新用户画像和后续复习计划。
+ */
+export async function reportPracticeCompletion(params = {}) {
+  const res = await request('/api/practice/sessions/complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      questionCount: params.questionCount,
+      correctCount: params.correctCount,
+      durationSeconds: params.durationSeconds || 0,
+    }),
+  });
+  return unwrap(res);
 }
 
 // ============================================================================
@@ -661,11 +760,19 @@ export async function getNextQuestion(params = {}) {
  * 💡 后端不可用时自动回退到 Mock 数据
  */
 export async function generateSession(params = {}) {
-  const count = Math.max(1, Math.min(50, Number(params.questionCount) || 10));
+  const selectedQuestionIds = [...new Set(
+    (Array.isArray(params.questionIds) ? params.questionIds : [])
+      .map((questionId) => Number(questionId))
+      .filter((questionId) => Number.isSafeInteger(questionId) && questionId > 0)
+  )];
+  const count = selectedQuestionIds.length > 0
+    ? selectedQuestionIds.length
+    : Math.max(1, Math.min(50, Number(params.questionCount) || 10));
   const beParams = { page: 1, pageSize: 100, status: 'ENABLED' };
   if (params.subject) beParams.subject = SUBJECT_REVERSE[params.subject] || params.subject;
   if (params.grade) beParams.gradeLevel = params.grade;
   if (params.chapter) beParams.chapter = params.chapter;
+  if (params.knowledgePoint) beParams.knowledgePoint = params.knowledgePoint;
   if (params.questionType) beParams.questionType = TYPE_FE_TO_BE[params.questionType] || params.questionType;
   if (params.difficulty) beParams.difficulty = DIFF_FE_TO_BE[params.difficulty] || params.difficulty;
   if (params.lessonId) beParams.lessonId = params.lessonId;
@@ -673,6 +780,21 @@ export async function generateSession(params = {}) {
   if (params.mode) beParams.mode = params.mode;
 
   try {
+    if (params.mode === 'MISTAKE_REDO' && selectedQuestionIds.length > 0) {
+      const questions = await Promise.all(selectedQuestionIds.map((questionId) => getQuestionDetail(questionId)));
+      if (questions.some((question) => !question)) {
+        throw new Error('部分所选错题已不存在或无法读取');
+      }
+      return {
+        sessionId: 'mistake_redo_' + Date.now(),
+        questions,
+        totalCount: questions.length,
+        requestedCount: selectedQuestionIds.length,
+        subject: 'mistakes',
+        availabilityNotice: '',
+      };
+    }
+
     const res = await request('/api/practice/questions' + buildQuery(beParams));
     const data = unwrap(res);
     const items = (data.records || []).map(q => transformQuestion(q, true));
@@ -693,6 +815,9 @@ export async function generateSession(params = {}) {
         : '',
     };
   } catch (err) {
+    if (params.mode === 'MISTAKE_REDO' && selectedQuestionIds.length > 0) {
+      throw persistentApiError('加载选中的错题', err);
+    }
     if (err.skipMockFallback) throw err;
     if (!PRACTICE_MOCK_ENABLED) throw persistentApiError('生成练习', err);
     // 🔶 后端不可用，回退到 Mock 数据
@@ -734,6 +859,27 @@ export async function deleteWrongQuestion(wrongQuestionId) {
   }
 }
 
+export async function deleteWrongQuestions(wrongQuestionIds = []) {
+  const ids = [...new Set(
+    (Array.isArray(wrongQuestionIds) ? wrongQuestionIds : [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isSafeInteger(id) && id > 0)
+  )];
+  if (ids.length === 0) {
+    return { success: false, reason: '请选择需要删除的错题' };
+  }
+  try {
+    const res = await request('/api/wrong-questions/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+    return { success: true, data: unwrap(res) };
+  } catch (err) {
+    console.warn('[M1] deleteWrongQuestions 失败:', err.message);
+    return { success: false, reason: err.message };
+  }
+}
+
 /**
  * 获取积分明细  ✅ GET /api/practice/dashboard
  */
@@ -742,10 +888,10 @@ export async function getDashboard() {
     const res = await request('/api/practice/dashboard');
     const data = unwrap(res);
     return {
-      totalPoints: data.totalPoints || 0,
-      streakDays: data.streakDays || 0,
-      todayQuestions: data.todayQuestions || 0,
-      todayCorrect: data.todayCorrect || 0,
+      totalPoints: data.totalPoints ?? 0,
+      streakDays: data.currentStreak ?? data.streakDays ?? 0,
+      todayQuestions: data.todayCount ?? data.todayQuestions ?? 0,
+      todayCorrect: data.todayCorrect ?? 0,
       rank: data.rank || null,
     };
   } catch (err) {

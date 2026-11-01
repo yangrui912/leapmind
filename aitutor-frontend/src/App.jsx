@@ -23,6 +23,13 @@ import QuestionBankPage from './pages/QuestionBankPage.jsx';
 import WrongQuestionBookPage from './pages/WrongQuestionBookPage.jsx';
 import StatisticsPage from './pages/StatisticsPage.jsx';
 import RankingPage from './pages/RankingPage.jsx';
+import WeakPointListPage from './pages/m3/WeakPointListPage';
+import WeakPointDetailPage from './pages/m3/WeakPointDetailPage';
+import KnowledgeGraphPage from './pages/m3/KnowledgeGraphPage';
+import LessonPrepCreatePage from './pages/m5/LessonPrepCreatePage';
+import LessonPrepEditPage from './pages/m5/LessonPrepEditPage';
+import PptEditorPage from './pages/m5/PptEditorPage';
+import LessonPrepListPage from './pages/m5/LessonPrepListPage';
 import { hasValidToken } from './utils/tokenManager';
 import { checkAuth } from './services/authService';
 
@@ -38,8 +45,13 @@ export default function App() {
     const [learningProfileView, setLearningProfileView] = useState(null); // null | overview | detail
     const [selectedKnowledgePointId, setSelectedKnowledgePointId] = useState(null);
     const [m4Page, setM4Page] = useState(null); // null | 'active' — M4 讲课全屏容器
+    const [m4InitialText, setM4InitialText] = useState(''); // M4 搜索栏带入的初始内容
     const [m1Page, setM1Page] = useState(null); // null | practice | question-bank | mistakes | statistics | ranking
     const [m1PracticeParams, setM1PracticeParams] = useState({}); // M1 做题页参数（mode/lessonId 等）
+    const [m3Page, setM3Page] = useState(null); // null | 'list' | 'detail'
+    const [m3Params, setM3Params] = useState({}); // 传递给 M3 页面的参数
+    const [m5Page, setM5Page] = useState(null); // null | 'create' | 'edit' | 'ppt-editor' | 'list'
+    const [m5Params, setM5Params] = useState({}); // 传递给 M5 页面的参数
 
     useEffect(() => {
         const checkSession = async () => {
@@ -86,20 +98,36 @@ export default function App() {
     };
 
     // M4 入口/出口
-    const handleLaunchM4 = () => setM4Page('active');
+    const handleLaunchM4 = (initialText) => {
+      setM4InitialText(initialText || '');
+      setM4Page('active');
+    };
     const handleExitM4 = () => setM4Page(null);
     const handleLaunchM1 = (params) => {
+      // M4 讲完跳 M1 时，同时退出 M4 全屏容器，避免路由互斥
+      setM4Page(null);
       if (params && typeof params === 'object') {
-        setM1PracticeParams(params);
+        setM1PracticeParams({ ...params, launchId: Date.now() });
+      } else {
+        setM1PracticeParams({});
       }
       setM1Page('practice');
+    };
+
+    const handleM1Nav = (page) => {
+      setM1PracticeParams((params) => {
+        if (page === 'practice') return {};
+        if (params.mode !== 'MISTAKE_REDO') return params;
+        return params.lessonId ? { lessonId: params.lessonId } : {};
+      });
+      setM1Page(page);
     };
 
     return (
         <div className={isAuthed ? "flex h-screen bg-slate-100 text-slate-800" : "w-full h-screen"}>
             <GlobalStyles />
             {m4Page === 'active' ? (
-                <M4LectureContainer onExit={handleExitM4} />
+                <M4LectureContainer onExit={handleExitM4} onM1Practice={handleLaunchM1} initialText={m4InitialText} />
             ) : m1Page ? (
                 <div className="flex flex-col w-full h-full bg-slate-50">
                     <header className="shrink-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-4 flex-wrap shadow-sm">
@@ -121,7 +149,7 @@ export default function App() {
                                 <button
                                     type="button"
                                     key={page}
-                                    onClick={() => setM1Page(page)}
+                                    onClick={() => handleM1Nav(page)}
                                     className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer ${m1Page === page ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
                                 >
                                     {label}
@@ -132,16 +160,24 @@ export default function App() {
                     <main className="flex-1 min-h-0 overflow-auto p-4">
                         {m1Page === 'practice' ? (
                             <PracticePage
+                                key={m1PracticeParams.launchId || 'default-practice'}
                                 embedded
                                 mode={m1PracticeParams.mode}
                                 lessonId={m1PracticeParams.lessonId || ""}
                                 initialParams={m1PracticeParams}
+                                onResetPracticeParams={() => setM1PracticeParams({})}
                                 onViewStatistics={() => setM1Page('statistics')}
                             />
                         ) : m1Page === 'question-bank' ? (
                             <QuestionBankPage onStartPractice={handleLaunchM1} lessonId={m1PracticeParams.lessonId || ""} />
                         ) : m1Page === 'mistakes' ? (
-                            <WrongQuestionBookPage onRedo={() => handleLaunchM1({ mode: 'MISTAKE_REDO' })} />
+                            <WrongQuestionBookPage onRedo={(selection) => handleLaunchM1({
+                                mode: 'MISTAKE_REDO',
+                                questionIds: selection.questionIds,
+                                mistakeIds: selection.mistakeIds,
+                                questionCount: selection.questionCount,
+                                autoStart: true,
+                            })} />
                         ) : m1Page === 'statistics' ? (
                             <StatisticsPage />
                         ) : (
@@ -173,6 +209,42 @@ export default function App() {
                 <ExplainPage onBack={() => { const from = m2Params.from; setM2Params(from === 'explain-history' ? { from: 'explain' } : {}); setM2Page(from === 'explain-history' ? 'explain-history' : null); }} wrongQuestionId={m2Params.wrongQuestionId} replayId={m2Params.replayId} onExplainHistory={() => { setM2Params({ from: 'explain' }); setM2Page('explain-history'); }} />
             ) : m2Page === 'explain-history' ? (
                 <ExplainHistoryPage onBack={m2Params.from === 'explain' ? () => { setM2Params({}); setM2Page('explain'); } : () => setM2Page(null)} onReplay={(id) => { setM2Params({ replayId: id, from: 'explain-history' }); setM2Page('explain'); }} />
+            ) : m3Page === 'list' ? (
+                <WeakPointListPage
+                    onBack={() => setM3Page(null)}
+                    onDetail={(item) => { setM3Params({ item }); setM3Page('detail'); }}
+                    onPractice={(item) => { setM3Page(null); handleLaunchM1({ mode: 'WEAK_POINT_PRACTICE', kpId: item.id }); }}
+                />
+            ) : m3Page === 'detail' ? (
+                <WeakPointDetailPage
+                    item={m3Params.item}
+                    onBack={() => setM3Page('list')}
+                    onPractice={(it) => { setM3Page(null); handleLaunchM1({ mode: 'WEAK_POINT_PRACTICE', kpId: it.id }); }}
+                    onExplain={(err) => { setM3Page(null); setM2Params({}); setM2Page('explain'); }}
+                />
+            ) : m3Page === 'knowledge-graph' ? (
+                <KnowledgeGraphPage
+                    onBack={() => setM3Page(null)}
+                    onViewDetail={(node) => {
+                        // 图谱节点 → 详情页（节点只有 name/masteryRate/weaknessLevel/group，组装为薄弱点对象）
+                        const kp = {
+                            id: node.id ?? node.name,
+                            knowledgePoint: node.name,
+                            subject: node.group || node.subject || '',
+                            weaknessLevel: node.weaknessLevel,
+                            accuracyRate: node.masteryRate ?? 0,
+                            totalCount: 0,
+                            errorCount: 0,
+                        }
+                        setM3Params({ item: kp });
+                        setM3Page('detail');
+                    }}
+                    onPractice={(node) => {
+                        // 双击节点 → 跳 M1 做题
+                        setM3Page(null);
+                        handleLaunchM1({ mode: 'WEAK_POINT_PRACTICE', knowledgePoint: node.name });
+                    }}
+                />
             ) : currentCourseId ? (
                       <LecturePresentPage
                           lectureData={{ ...mockPPTStructure, courseId: currentCourseId, title: `课程 ${currentCourseId}` }}
@@ -180,6 +252,39 @@ export default function App() {
                           onBack={() => setCurrentCourseId('')}
                           onFinish={() => setCurrentCourseId('')}
                       />
+            ) : m5Page === 'create' ? (
+                <LessonPrepCreatePage
+                  onBack={() => { const from = m5Params.from; setM5Params({}); setM5Page(from === 'list' ? 'list' : null); }}
+                  onPrepCreated={(prepId) => { setM5Params({ prepId, from: 'create' }); setM5Page('edit'); }}
+                />
+            ) : m5Page === 'edit' ? (
+                <LessonPrepEditPage
+                  prepId={m5Params.prepId}
+                  onBack={() => { const from = m5Params.from; setM5Params({}); setM5Page(from === 'edit' ? 'create' : 'list'); }}
+                  onGeneratedPpt={(result) => { setM5Params({ ...m5Params, pptSlides: result.slides, pptId: result.pptId, from: 'edit' }); setM5Page('ppt-editor'); }}
+                />
+            ) : m5Page === 'ppt-editor' ? (
+                <PptEditorPage
+                  pptId={m5Params.pptId}
+                  initialSlides={m5Params.pptSlides}
+                  onBack={() => { const from = m5Params.from; setM5Params({}); setM5Page(from === 'edit' ? 'edit' : 'list'); }}
+                />
+            ) : m5Page === 'list' ? (
+                <LessonPrepListPage
+                  onBack={() => setM5Page(null)}
+                  onCreate={() => { setM5Params({ from: 'list' }); setM5Page('create'); }}
+                  onEdit={(prepId) => { setM5Params({ prepId, from: 'list' }); setM5Page('edit'); }}
+                  onPreviewPpt={(item) => {
+                    // 从 pptStructure 解析 slides 供 PPT 编辑页使用
+                    let slides = []
+                    try {
+                      const parsed = typeof item.pptStructure === 'string' ? JSON.parse(item.pptStructure) : item.pptStructure
+                      slides = parsed?.slides || parsed?.pages || []
+                    } catch (e) { /* ignore */ }
+                    setM5Params({ pptId: item.prepId, pptSlides: slides, from: 'list' });
+                    setM5Page('ppt-editor');
+                  }}
+                />
             ) : learningProfileView === 'detail' ? (
                 <KnowledgePointDetailPage
                     knowledgePointId={selectedKnowledgePointId}
@@ -197,7 +302,6 @@ export default function App() {
                 ) : showProfile ? (
                     <ProfilePage onBack={() => setShowProfile(false)} />
                 ) : (
-                    <div className="relative w-full h-full">
                     <TemHomePage 
                         onEnterProject={(courseId) => setCurrentCourseId(courseId)}
                         onOpenProfile={handleOpenProfile}
@@ -206,17 +310,12 @@ export default function App() {
                         onM2Explain={() => { setM2Params({}); setM2Page('explain'); }}
                         onOpenLearningProfile={handleOpenLearningProfile}
                         onM1Practice={handleLaunchM1}
+                        onM4Lecture={handleLaunchM4}
+                        onM3WeakPoints={() => setM3Page('list')}
+                        onM3KnowledgeGraph={() => setM3Page('knowledge-graph')}
+                        onM5Create={() => setM5Page('create')}
+                        onM5List={() => setM5Page('list')}
                     />
-                    {/* M4 讲课入口（浮动按钮，联调后可移除或整合到首页） */}
-                    <button
-                        onClick={handleLaunchM4}
-                        className="absolute bottom-6 right-6 flex items-center gap-2 px-4 py-2.5 bg-purple-600 text-white rounded-full shadow-lg hover:bg-purple-700 active:scale-95 transition-all text-sm font-medium z-40"
-                        title="AI 即时讲课"
-                    >
-                        <span className="text-lg">🎓</span>
-                        AI 讲课
-                    </button>
-                    </div>
                 )
             )}
         </div>

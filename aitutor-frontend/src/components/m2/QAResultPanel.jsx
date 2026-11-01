@@ -91,6 +91,7 @@ export default function QAResultPanel({ ocrRecordId, question, onKnowledgePointC
     setAddingToWrong(false)
   }
 
+  // M6 上报：学生反馈讲解理解程度
   const handleFollowUp = () => {
     if (!followUp.trim() || followUpLoading) return
     sendFollowUp(followUp.trim())
@@ -203,23 +204,36 @@ export default function QAResultPanel({ ocrRecordId, question, onKnowledgePointC
       {done && (
         <div className="mt-4 space-y-3">
           {/* 反馈按钮 */}
-          <div className="flex gap-3">
+          <div className="flex gap-2">
             <button
+              type="button"
               onClick={() => handleFeedback('understood')}
-              className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5 border ${
+              className={`flex-1 px-3 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5 border ${
                 feedback === 'understood'
                   ? 'bg-green-500/30 text-green-300 border-green-400/30'
-                  : 'bg-green-500/20 text-green-300 border-green-400/20 hover:bg-green-500/30'
+                  : 'bg-white/10 text-white/70 hover:bg-white/20 border-white/10'
               }`}
             >
               <ThumbsUp className="w-4 h-4" /> 懂了
             </button>
             <button
+              type="button"
+              onClick={() => handleFeedback('partly_understood')}
+              className={`flex-1 px-3 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5 border ${
+                feedback === 'partly_understood'
+                  ? 'bg-blue-500/30 text-blue-300 border-blue-400/30'
+                  : 'bg-white/10 text-white/70 hover:bg-white/20 border-white/10'
+              }`}
+            >
+              <HelpCircle className="w-4 h-4" /> 部分理解
+            </button>
+            <button
+              type="button"
               onClick={() => handleFeedback('still_confused')}
-              className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5 border ${
+              className={`flex-1 px-3 py-2 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-1.5 border ${
                 feedback === 'still_confused'
                   ? 'bg-yellow-500/30 text-yellow-300 border-yellow-400/30'
-                  : 'bg-yellow-500/20 text-yellow-300 border-yellow-400/20 hover:bg-yellow-500/30'
+                  : 'bg-white/10 text-white/70 hover:bg-white/20 border-white/10'
               }`}
             >
               <HelpCircle className="w-4 h-4" /> 还有疑问
@@ -228,6 +242,7 @@ export default function QAResultPanel({ ocrRecordId, question, onKnowledgePointC
 
           {/* 添加到错题本 */}
           <button
+            type="button"
             onClick={handleAddToWrongBook}
             disabled={inWrongBook || addingToWrong}
             className={`w-full py-2.5 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${
@@ -279,6 +294,7 @@ export default function QAResultPanel({ ocrRecordId, question, onKnowledgePointC
                 className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/90 placeholder-white/30 focus:outline-none focus:border-purple-400/50"
               />
               <button
+                type="button"
                 onClick={handleFollowUp}
                 disabled={!followUp.trim() || followUpLoading}
                 className="w-8 h-8 rounded-lg bg-gradient-to-r from-purple-500 to-blue-500 text-white flex items-center justify-center disabled:opacity-40 hover:shadow-lg hover:shadow-purple-500/20 transition-all shrink-0"

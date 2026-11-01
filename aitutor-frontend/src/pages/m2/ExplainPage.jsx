@@ -474,6 +474,17 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
                         懂了
                       </button>
                       <button
+                        onClick={() => handleFeedback('partly_understood')}
+                        className={`flex-1 py-3 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${
+                          feedback === 'partly_understood'
+                            ? 'bg-blue-500/30 text-blue-300 border border-blue-400/30'
+                            : 'bg-white/10 text-white/70 hover:bg-white/20 border border-white/10'
+                        }`}
+                      >
+                        <HelpCircle className="w-4 h-4" />
+                        部分理解
+                      </button>
+                      <button
                         onClick={() => handleFeedback('still_confused')}
                         className={`flex-1 py-3 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${
                           feedback === 'still_confused'

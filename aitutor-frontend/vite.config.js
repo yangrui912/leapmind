@@ -22,8 +22,7 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
-        // 代理条目取并集：main 与 develop 指向同一后端（JAVA_API_TARGET，默认 8080），
-        // main 侧路径集合为 develop 的超集（多 /api/questions），保留 main 明细写法
+        // 代理条目取并集：integration 与 frontend 线指向同一后端（JAVA_API_TARGET，默认 8080）。
         // PPT & 业务（Java 后端）
         '/api/speech': {
           target: javaApi,
@@ -113,6 +112,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
+        // 以下 5 条来自 frontend 线：M4/M5 讲课与备课、PPT、薄弱点、练习
+        '/api/lesson-prep': javaProxy,
+        '/api/teaching': javaProxy,
+        '/api/ppt': javaProxy,
+        '/api/weak-points': javaProxy,
+        '/api/exercises': javaProxy,
       },
     },
   }

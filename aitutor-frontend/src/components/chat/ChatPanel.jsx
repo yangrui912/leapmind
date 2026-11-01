@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useChatSession } from '../../hooks/useChatSession';
 import MessageBubble from './MessageBubble';
 import InterruptButton from './InterruptButton';
@@ -30,6 +30,9 @@ import { createOneShotRecognition } from '../../features/chat/pptSpeech';
  *   userId: number,
  *   visible?: boolean,
  *   onClose?: () => void,
+ *   onMessageSent?: (text: string) => void,  // M6 对接: 消息发送后回调
+ *   onAssistantComplete?: (text: string) => void,
+ *   autoRestore?: boolean,
  *   title?: string,
  *   className?: string,
  * }} props
@@ -40,20 +43,36 @@ const ChatPanel = ({
   userId,
   visible = true,
   onClose,
+  onMessageSent,
+  onAssistantComplete,
+  externalQuestion,
+  autoRestore = true,
   title = 'AI 助手',
   className = '',
 }) => {
-  const { messages, isGenerating, sessionId, error, send, abort, retry, clear } = useChatSession({
+  const { messages, phase, isGenerating, sessionId, error, send, abort, retry, clear } = useChatSession({
     sceneType,
     context,
     userId,
-    autoRestore: true,
+    autoRestore,
+    onAssistantComplete,
   });
 
   const [inputValue, setInputValue] = useState('');
   const [isVoiceListening, setIsVoiceListening] = useState(false);
+  // 本地去重轻提示（连点相同/不同问题时的提示，短暂显示后消失）
+  const [dedupNotice, setDedupNotice] = useState('');
+  const dedupNoticeTimerRef = useRef(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+  const lastExternalQuestionRef = useRef(null);
+
+  // 短暂显示去重提示（2s 后自动消失）
+  const showDedupNotice = (msg) => {
+    setDedupNotice(msg);
+    if (dedupNoticeTimerRef.current) clearTimeout(dedupNoticeTimerRef.current);
+    dedupNoticeTimerRef.current = setTimeout(() => setDedupNotice(''), 2000);
+  };
 
   // 消息更新时自动滚到底部
   useEffect(() => {
@@ -73,14 +92,38 @@ const ChatPanel = ({
     }
   }, [visible]);
 
+  // 多行输入会临时增高；发送或语音提交清空后恢复为与相邻按钮一致的 36px。
+  useEffect(() => {
+    if (!inputValue && inputRef.current) {
+      inputRef.current.style.height = '36px';
+    }
+  }, [inputValue]);
+
   // -------- 发送文本 --------
   const handleSend = (e) => {
     e?.preventDefault();
     const text = inputValue.trim();
-    if (!text || isGenerating) return;
-    send(text);
+    if (!text) return;
+    const result = send(text);
+    if (result === 'duplicate') {
+      showDedupNotice('该问题正在回复中，请稍候...');
+      return;
+    }
+    if (result === 'busy') {
+      showDedupNotice('AI 正在回复其他问题，请稍候...');
+      return;
+    }
     setInputValue('');
+    onMessageSent?.(text);
   };
+
+  useEffect(() => {
+    const text = externalQuestion?.text?.trim();
+    if (!text || externalQuestion.id === lastExternalQuestionRef.current) return;
+    lastExternalQuestionRef.current = externalQuestion.id;
+    const result = send(text);
+    if (!result) onMessageSent?.(text);
+  }, [externalQuestion, onMessageSent, send]);
 
   // -------- 语音输入 --------
   const handleVoiceInput = async () => {
@@ -140,7 +183,6 @@ const ChatPanel = ({
   // -------- 图片上传（占位） --------
   const handleImageUpload = () => {
     // TODO-IMAGE: 接入拍照/图片上传 → OCR 识别 → send(recognizedText)
-    // eslint-disable-next-line no-console
     console.log('[ChatPanel] image upload not yet implemented');
   };
 
@@ -217,24 +259,49 @@ const ChatPanel = ({
         )}
         {messages.map((msg, i) => (
           <MessageBubble
-            key={i}
+            key={`${msg.role}-${i}`}
             role={msg.role}
             content={msg.content}
+            contextLabel={msg.contextLabel}
             isStreaming={msg.isStreaming}
             error={msg.error}
           />
         ))}
-        {/* 错误 + 重试 */}
-        {error && (
-          <div className="flex justify-center my-2">
-            <div className="flex items-center gap-2 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-lg">
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-              </svg>
-              <span>{error}</span>
-              <button onClick={retry} className="font-medium underline hover:no-underline">重试</button>
+        {/* thinking 态：Loading 指示器（对齐 M7 对接文档：骨架屏/Loading 动画） */}
+        {phase === 'thinking' && (
+          <div className="flex justify-start px-2 py-1.5">
+            <div className="flex items-center gap-2 px-3 py-2 text-xs text-slate-500 bg-white rounded-xl shadow-sm">
+              <span className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
+              <span>AI 正在思考...</span>
             </div>
           </div>
+        )}
+        {/* 错误 + 重试 */}
+        {error && (
+          (error.code && error.code !== 1003 && error.code !== 2001) ? (
+            <div className="flex justify-center my-2">
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-lg">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{error.message}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex justify-center my-2">
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-red-600 bg-red-50 rounded-lg">
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>{error.message}</span>
+                <button onClick={retry} className="font-medium underline hover:no-underline">重试</button>
+              </div>
+            </div>
+          )
         )}
       </div>
 
@@ -242,6 +309,15 @@ const ChatPanel = ({
       {isGenerating && (
         <div className="flex-shrink-0 flex justify-center pb-1">
           <InterruptButton onClick={abort} />
+        </div>
+      )}
+
+      {/* ===== 去重提示条（连点相同问题时的轻提示） ===== */}
+      {dedupNotice && (
+        <div className="flex-shrink-0 flex justify-center">
+          <div className="px-3 py-1 text-xs text-indigo-600 bg-indigo-50 rounded-full">
+            {dedupNotice}
+          </div>
         </div>
       )}
 
@@ -293,10 +369,9 @@ const ChatPanel = ({
                 handleSend();
               }
             }}
-            placeholder={isGenerating ? 'AI 正在回复...' : '输入你的问题...'}
-            disabled={isGenerating}
+            placeholder={isGenerating ? 'AI 正在回复中，可继续输入...' : '输入你的问题...'}
             rows={1}
-            className="flex-1 px-3 py-2 text-sm bg-slate-100 border border-transparent rounded-xl resize-none outline-none focus:border-indigo-300 focus:bg-white transition-colors placeholder:text-slate-400 disabled:opacity-50"
+            className="flex-1 h-9 px-3 py-1.5 text-sm leading-[22px] bg-slate-100 border border-transparent rounded-xl resize-none outline-none focus:border-indigo-300 focus:bg-white transition-colors placeholder:text-slate-400"
             style={{ minHeight: '36px', maxHeight: '100px' }}
             onInput={(e) => {
               e.target.style.height = 'auto';
@@ -307,7 +382,7 @@ const ChatPanel = ({
           {/* 发送按钮 */}
           <button
             type="submit"
-            disabled={!inputValue.trim() || isGenerating}
+            disabled={!inputValue.trim()}
             className="flex-shrink-0 w-9 h-9 flex items-center justify-center bg-indigo-500 text-white rounded-xl hover:bg-indigo-600 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors shadow-sm"
             title="发送"
           >

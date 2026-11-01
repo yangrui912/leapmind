@@ -21,13 +21,26 @@ import LectureCreatePage from './LectureCreatePage';
 import LectureWaitingPage from './LectureWaitingPage';
 import LecturePresentPage from './LecturePresentPage';
 import LectureHistoryPage from './LectureHistoryPage';
+import { getUserInfo } from '../../utils/tokenManager';
 
-export default function M4LectureContainer({ onExit }) {
+export default function M4LectureContainer({ onExit, onM1Practice, initialText }) {
   const [route, setRoute] = useState('create'); // create | waiting | present | history
   const [params, setParams] = useState(null);
   const [result, setResult] = useState(null);
+  const userInfo = getUserInfo();
+  const userId = userInfo?.id ?? userInfo?.userId;
 
   const handleStartGeneration = useCallback((p) => {
+    if (Array.isArray(p?.importedSlides) && p.importedSlides.length > 0) {
+      setResult({
+        lectureId: p.importedPrepId,
+        title: p.importedTitle || '从备课库导入的讲课',
+        slides: p.importedSlides,
+        knowledgePoints: p.selectedWeakPoints || [],
+      });
+      setRoute('present');
+      return;
+    }
     setParams(p);
     setRoute('waiting');
   }, []);
@@ -45,14 +58,28 @@ export default function M4LectureContainer({ onExit }) {
   }, []);
   const handleLectureFinish = useCallback((info) => {
     console.log('讲课完成:', info);
-    // TODO-REAL: 跳转 M1 做题（带知识点参数）
+    // 跳转 M1 做题（带知识点参数，供做题会话按知识点筛选题目）
+    const lectureId = info?.lectureId ?? result?.lectureId;
+    const knowledgePoints = info?.knowledgePoints ?? result?.knowledgePoints ?? params?.knowledgePoints ?? [];
+    const kpIds = Array.isArray(knowledgePoints)
+      ? knowledgePoints.map((kp) => kp?.id ?? kp?.kpId).filter((id) => id != null)
+      : [];
+    if (typeof onM1Practice === 'function') {
+      onM1Practice({
+        mode: 'AFTER_CLASS',
+        lessonId: lectureId != null ? String(lectureId) : '',
+        knowledgePoints: kpIds,
+        ...(params || {}),
+      });
+    }
     onExit?.();
-  }, [onExit]);
+  }, [onExit, onM1Practice, result, params]);
 
   if (route === 'create') {
     return (
       <LectureCreatePage
-        userId={1}
+        userId={userId}
+        initialText={initialText}
         onStartGeneration={handleStartGeneration}
         onViewHistory={handleViewHistory}
         onExit={onExit}
@@ -72,8 +99,9 @@ export default function M4LectureContainer({ onExit }) {
     return (
       <LecturePresentPage
         lectureData={result}
-        userId={1}
+        userId={userId}
         onBack={handleBackFromLecture}
+        onHome={onExit}
         onFinish={handleLectureFinish}
       />
     );
@@ -81,7 +109,7 @@ export default function M4LectureContainer({ onExit }) {
   if (route === 'history') {
     return (
       <LectureHistoryPage
-        userId={1}
+        userId={userId}
         onSelectLecture={(item) => {
           setResult({ lectureId: item.lectureId, title: item.title, slides: item.slides || item.previewSlides });
           setRoute('present');

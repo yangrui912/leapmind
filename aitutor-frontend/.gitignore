@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Vite cache
+.vite/
+
+# Local environment configuration. Never commit API keys or machine-specific endpoints.
+.env
+.env.*
+!.env.example

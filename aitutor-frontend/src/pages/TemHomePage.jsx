@@ -1,6 +1,6 @@
 "use client"
 
-import { Star, ChevronRight, MessageCircle, ChevronDown, Sparkles } from "lucide-react"
+import { Star, ChevronRight, MessageCircle, ChevronDown, Sparkles, Search } from "lucide-react"
 import { useState, useRef, useLayoutEffect, useEffect } from "react"
 import { getAllStages, getGradesByStage } from '../services/educationService'
 import { getSections, SEMESTER } from '../services/courseService'
@@ -43,6 +43,11 @@ export default function LearningApp({
   onM2Explain,
   onOpenLearningProfile,
   onM1Practice,
+  onM4Lecture,
+  onM3WeakPoints,
+  onM3KnowledgeGraph,
+  onM5Create,
+  onM5List,
 }) {
   // UI 状态
   const [isGradeOpen, setIsGradeOpen] = useState(false)
@@ -51,6 +56,7 @@ export default function LearningApp({
   const [selectedSubject, setSelectedSubject] = useState("语文")
   const [toastMessage, setToastMessage] = useState("")
   const [showToast, setShowToast] = useState(false)
+  const [lectureSearch, setLectureSearch] = useState("") // AI 讲课搜索栏内容
   const containerRef = useRef(null)
   const firstDotRef = useRef(null)
   const lastDotRef = useRef(null)
@@ -458,6 +464,9 @@ export default function LearningApp({
     { id: 'ai-explain', title: "AI 讲题", color: "from-purple-400 via-purple-300 to-indigo-500", icon: null, custom: true, action: onM2Explain },
     { id: 'learning-profile', title: "学情分析", color: "from-cyan-300 via-blue-300 to-blue-500", icon: "./svg/xueqingfenxi.svg", action: onOpenLearningProfile },
     { id: 'm1-practice', title: "AI 做题", color: "from-emerald-400 via-green-400 to-teal-500", icon: null, custom: true, action: onM1Practice },
+    { id: 'm3-weak-points', title: "薄弱点分析", color: "from-orange-400 via-amber-400 to-yellow-500", icon: null, custom: true, action: onM3WeakPoints },
+    { id: 'm3-knowledge-graph', title: "知识图谱", color: "from-indigo-400 via-violet-400 to-purple-500", icon: null, custom: true, action: onM3KnowledgeGraph },
+    { id: 'm5-lesson-prep', title: "AI 备课", color: "from-emerald-400 via-teal-400 to-cyan-500", icon: null, custom: true, action: onM5List },
   ]
 
 
@@ -477,7 +486,7 @@ export default function LearningApp({
   }, [])
 
   return (
-    <div className="min-h-screen w-full bg-gradient-to-br from-purple-700 via-purple-600 via-blue-600 via-blue-700 to-blue-900 text-white overflow-hidden" style={{backgroundImage: "linear-gradient(135deg, #861FCE 0%, #861FCE 16%, #731CCD 16%, #731CCD 32%, #6B1CCF 32%, #6B1CCF 48%, #631DCE 48%, #631DCE 64%, #5A1BCE 64%, #5A1BCE 80%,rgb(86, 43, 205) 80%,rgb(47, 8, 154) 100%)"}}>
+    <div className="min-h-screen w-full bg-gradient-to-br from-purple-700 via-purple-600 via-blue-600 via-blue-700 to-blue-900 text-white overflow-x-hidden overflow-y-auto" style={{backgroundImage: "linear-gradient(135deg, #861FCE 0%, #861FCE 16%, #731CCD 16%, #731CCD 32%, #6B1CCF 32%, #6B1CCF 48%, #631DCE 48%, #631DCE 64%, #5A1BCE 64%, #5A1BCE 80%,rgb(86, 43, 205) 80%,rgb(47, 8, 154) 100%)"}}>
       <style>{scrollbarStyles}</style>
       <header className="px-10 py-6 flex items-center justify-between border-b border-purple-400/20">
         <div className="flex items-center gap-4">
@@ -579,7 +588,7 @@ export default function LearningApp({
 
        {/* <div className="items-stretch flex-1 flex-col lg:flex-row gap-8 p-6 lg:p-8 justify-center  overflow-auto max-w-full mx-auto">  */}
        {/* <div className="flex flex-col lg:flex-row gap-8 p-6 lg:p-8 justify-center items-center min-h-[calc(100vh-120px)] max-w-full mx-auto"> */}
-       <div className="flex flex-col lg:flex-row gap-8 p-6 lg:p-8 justify-center items-center min-h-[calc(100vh-120px)] max-w-full mx-auto">
+       <div className="flex flex-col lg:flex-row gap-8 p-6 lg:p-8 justify-center items-start min-h-[calc(100vh-120px)] max-w-full mx-auto">
         {/* Main Content */}
         {/*主要内内容的紫色阴影背景，包含整个学习模块列表*/}
         <div className="w-full lg:flex-1 lg:max-w-5xl bg-gradient-to-b from-purple-900/40 to-purple-800/20 rounded-3xl p-8 backdrop-blur-md border border-purple-500/20 shadow-2xl py-0 px-0 relative">
@@ -621,6 +630,41 @@ export default function LearningApp({
               <button className="bg-yellow-400 text-purple-900 px-8 py-3 rounded-full font-bold text-base hover:bg-yellow-300 transition duration-150 shadow-lg hover:shadow-2xl hover:-translate-y-1 active:translate-y-0.5 active:shadow-md border-b-4 border-yellow-600 hover:border-yellow-700 transform whitespace-nowrap">
                 选课
               </button>
+              {/* AI 讲课搜索栏：输入内容回车即可进入 AI 讲课（按钮内嵌输入框右侧） */}
+              <div className="flex-1 min-w-0 flex justify-end">
+                <div className="relative flex-1 min-w-[220px] max-w-md">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-purple-300" />
+                  <input
+                    type="text"
+                    value={lectureSearch}
+                    onChange={(e) => setLectureSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        onM4Lecture?.(lectureSearch.trim())
+                        setLectureSearch('')
+                      }
+                    }}
+                    placeholder="输入想讲的内容，AI 帮你讲课"
+                    className="w-full bg-white/95 text-purple-900 placeholder:text-purple-300/80 text-sm rounded-full pl-9 pr-28 py-2.5 shadow-inner focus:outline-none focus:ring-2 focus:ring-cyan-300/70 border border-white/40"
+                  />
+                  {/* 内嵌右侧按钮：点击/回车即进入 AI 讲课 */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onM4Lecture?.(lectureSearch.trim())
+                      setLectureSearch('')
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1 pl-3 pr-2 h-9 rounded-full bg-gradient-to-br from-[#A286FF] to-[#7C3AED] text-white text-sm font-bold shadow-md hover:scale-105 hover:shadow-lg active:scale-95 transition-all duration-200"
+                    title="进入 AI 讲课"
+                  >
+                    进入讲课
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M5 12h14" />
+                      <path d="m12 5 7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
           
@@ -717,6 +761,38 @@ export default function LearningApp({
               className={`w-full bg-gradient-to-br ${feature.color} rounded-xl p-0 text-center text-purple-900 font-semibold text-base shadow-2xl hover:shadow-xl transition-all duration-300 transform hover:scale-105 hover:-translate-y-1 cursor-pointer min-h-48 flex flex-col items-center justify-center border border-white/20 overflow-hidden focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-200/70`}
             >
               {feature.custom ? (
+                feature.title === "薄弱点分析" ? (
+                  <div className="flex items-center justify-center w-full h-full gap-3 px-3">
+                    {/* 左边：柱状分析图标 */}
+                    <svg className="w-16 h-16 shrink-0" viewBox="0 0 80 80">
+                      <circle cx="40" cy="40" r="30" fill="white" opacity="0.2"/>
+                      <rect x="18" y="38" width="12" height="26" rx="3" fill="white" opacity="0.85"/>
+                      <rect x="34" y="26" width="12" height="38" rx="3" fill="white" opacity="0.95"/>
+                      <rect x="50" y="32" width="12" height="32" rx="3" fill="white" opacity="0.75"/>
+                      <rect x="18" y="64" width="44" height="4" rx="2" fill="white" opacity="0.4"/>
+                      <circle cx="40" cy="18" r="4" fill="#FFD700" opacity="0.9"/>
+                    </svg>
+                    {/* 中间：文字 */}
+                    <div className="flex flex-col items-center justify-center flex-1">
+                      <span className="text-3xl font-bold text-white drop-shadow-xl tracking-[0.2em] leading-tight">薄弱点</span>
+                      <span className="text-2xl font-semibold text-white/90 drop-shadow-xl tracking-[0.25em] leading-tight mt-1">分析</span>
+                      <div className="flex items-center gap-1.5 mt-2">
+                        <div className="w-2 h-2 rounded-full bg-white/60" />
+                        <div className="w-2 h-2 rounded-full bg-white/40" />
+                        <div className="w-2 h-2 rounded-full bg-white/20" />
+                      </div>
+                    </div>
+                    {/* 右边：星光 */}
+                    <div className="flex flex-col items-center gap-1.5 shrink-0">
+                      <svg className="w-6 h-6 text-yellow-200/70" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10 0l1.5 6.5L18 7l-5.5 3.5L13 17l-3-4.5L7 17l.5-6.5L2 7l6.5-.5z"/>
+                      </svg>
+                      <svg className="w-4 h-4 text-blue-200/50" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10 0l1.5 6.5L18 7l-5.5 3.5L13 17l-3-4.5L7 17l.5-6.5L2 7l6.5-.5z"/>
+                      </svg>
+                    </div>
+                  </div>
+                ) : (
                 <div className="flex items-center justify-center w-full h-full gap-3 px-3">
                   {/* 左边：小机器人 */}
                   <svg className="w-16 h-16 shrink-0" viewBox="0 0 80 80">
@@ -760,6 +836,7 @@ export default function LearningApp({
                     </svg>
                   </div>
                 </div>
+                )
               ) : feature.emoji ? (
                 <span className="text-5xl">{feature.emoji}</span>
               ) : feature.icon ? (

@@ -8,8 +8,17 @@ export default function AskMoreButton({ questionContext }) {
   const [input, setInput] = useState('')
 
   const userId = getUserInfo()?.userId || 1
+  // 补全题干：让后端把题目正文注入 AI system prompt（修复"追问不结合题目"）
+  // 参考 M7 前端报告问题 1：questionContent.stem / options 已在题目对象中
+  const content = questionContext?.questionContent
   const context = questionContext
-    ? { questionId: questionContext.questionId || questionContext.id, relatedKpId: questionContext.knowledgePoints?.[0]?.id }
+    ? {
+        // explaining 场景按错题/讲解记录隔离会话，不能退化成全局 default。
+        wrongQuestionId: questionContext.questionId || questionContext.id,
+        stem: content?.stem,
+        options: content?.options,
+        relatedKpId: questionContext.knowledgePoints?.[0]?.id,
+      }
     : {}
 
   const { messages, isGenerating, error, send, clear } = useChatSession({
@@ -36,6 +45,7 @@ export default function AskMoreButton({ questionContext }) {
     <div>
       {!open ? (
         <button
+          type="button"
           onClick={() => setOpen(true)}
           className="w-full py-2.5 bg-white/10 border border-white/10 rounded-xl text-sm text-white/70 hover:bg-white/20 hover:text-white transition-all flex items-center justify-center gap-2"
         >
@@ -51,9 +61,9 @@ export default function AskMoreButton({ questionContext }) {
             </span>
             <div className="flex items-center gap-2">
               {messages.length > 0 && (
-                <button onClick={clear} className="text-[10px] text-white/30 hover:text-white/60 transition-colors">清空</button>
+                <button type="button" onClick={clear} className="text-[10px] text-white/30 hover:text-white/60 transition-colors">清空</button>
               )}
-              <button onClick={() => setOpen(false)} className="text-white/40 hover:text-white/70 transition-colors">
+              <button type="button" onClick={() => setOpen(false)} className="text-white/40 hover:text-white/70 transition-colors">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -62,7 +72,7 @@ export default function AskMoreButton({ questionContext }) {
           {error && (
             <div className="px-4 py-2 bg-red-500/10 border-b border-red-400/10 flex items-center gap-1.5">
               <AlertCircle className="w-3 h-3 text-red-300" />
-              <span className="text-[11px] text-red-200/80">{error}</span>
+              <span className="text-[11px] text-red-200/80">{error.message || '生成失败，请重试'}</span>
             </div>
           )}
 
@@ -102,6 +112,7 @@ export default function AskMoreButton({ questionContext }) {
               className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm text-white/90 placeholder-white/30 focus:outline-none focus:border-purple-400/50"
             />
             <button
+              type="button"
               onClick={handleSubmit}
               disabled={!input.trim() || isGenerating}
               className="w-8 h-8 rounded-lg bg-gradient-to-r from-purple-500 to-blue-500 text-white flex items-center justify-center disabled:opacity-40 hover:shadow-lg hover:shadow-purple-500/20 transition-all shrink-0"

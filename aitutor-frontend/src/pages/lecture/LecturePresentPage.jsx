@@ -9,7 +9,7 @@
  *  - TeacherPanel（虚拟教师形象 + 对话）
  * 
  * 新增：
- *  - ChatPanelPlaceholder（追问面板占位，联调时替换为 M7 ChatPanel）
+ *  - ChatPanel（追问对话，M7 共享组件；frontend 线 PR #98 增量并入，替换原占位组件）
  *  - 讲课结束时的总结面板
  *  - "做配套练习"按钮（跳转 M1 做题）
  */
@@ -17,7 +17,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import Header from '../../components/common/Header';
 import SlideViewer from '../../components/lecture/SlideViewer';
-import ChatPanelPlaceholder from '../../components/lecture/ChatPanelPlaceholder';
+import { ChatPanel } from '../../components/chat';
 import VirtualTeacherDock from '../../components/virtualTeacher/VirtualTeacherDock.jsx';
 import AvatarPickerDrawer from '../../components/virtualTeacher/AvatarPickerDrawer.jsx';
 import { useLectureSpeech } from '../../hooks/useLectureSpeech.js';
@@ -400,7 +400,7 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
           onViewerReady={handleViewerReady}
         />
         <div className="flex-1 min-h-0">
-          <ChatPanelPlaceholder sceneType="teaching" context={{ lectureId, slide: currentSlide }} userId={userId} />
+          <ChatPanel sceneType="teaching" context={{ lectureId, slide: currentSlide }} userId={userId} />
         </div>
         <button
           onClick={handleEndLecture}
@@ -452,7 +452,7 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
           </div>
         </div>
         <div className="flex-1 p-3 overflow-hidden">
-          <ChatPanelPlaceholder sceneType="teaching" context={{ lectureId, slide: currentSlide }} userId={userId} />
+          <ChatPanel sceneType="teaching" context={{ lectureId, slide: currentSlide }} userId={userId} />
         </div>
       </div>
 

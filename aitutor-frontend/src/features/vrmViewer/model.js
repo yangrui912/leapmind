@@ -158,7 +158,7 @@ export class Model {
     this._gestureTimeouts.push(headMotionTimeout);
     this._scheduleGestures(screenplay.gestures);
 
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
       this._lipSync?.playFromArrayBuffer(
         buffer,
         () => {
@@ -166,12 +166,28 @@ export class Model {
           resolve(true);
         },
         screenplay.phonemes,
-      );
+      ).catch(reject);
     });
 
     // 音频结束后清除口型数据，防止嘴型卡在张开状态
     this.emoteController?.lipSync('aa', 0);
     this.emoteController?.lipSyncWeights({ aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
+  }
+
+  async resumeAudio() {
+    return this._lipSync?.resumeAudioContext();
+  }
+
+  async pauseSpeaking() {
+    return this._lipSync?.pausePlayback();
+  }
+
+  async resumeSpeaking() {
+    return this._lipSync?.resumePlayback();
+  }
+
+  hasActiveSpeech() {
+    return Boolean(this._lipSync?.hasActivePlayback());
   }
 
   /**

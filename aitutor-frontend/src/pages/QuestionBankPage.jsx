@@ -4,7 +4,7 @@
  * 左侧筛选面板 + 右侧题目列表
  * 筛选条件：科目 → 年级 → 章节 → 题型 → 难度
  */
-import { useCallback, useState, useEffect, useRef } from "react";
+import { useCallback, useState, useEffect, useRef, useMemo } from "react";
 import {
   Search,
   Filter,
@@ -28,6 +28,7 @@ import {
   importQuestions,
   updateQuestion,
 } from "../services/practiceService";
+import MathText from "../components/practice/MathText";
 
 const createEmptyQuestionForm = (subject = "数学", gradeLevel = "大学") => ({
   subject,
@@ -57,6 +58,7 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
     subject: "",
     grade: "",
     chapter: "",
+    knowledgePoint: "",
     type: "",
     difficulty: "",
     lessonId: lessonId || "",
@@ -80,6 +82,9 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
   const [formError, setFormError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState([]);
+  const [showBatchDelete, setShowBatchDelete] = useState(false);
+  const [batchDeleting, setBatchDeleting] = useState(false);
   const [actionNotice, setActionNotice] = useState("");
 
   // 导入状态
@@ -96,12 +101,16 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
       if (filters.subject) params.subject = filters.subject;
       if (filters.grade) params.grade = filters.grade;
       if (filters.chapter) params.chapter = filters.chapter;
+      if (filters.knowledgePoint) params.knowledgePoint = filters.knowledgePoint;
       if (filters.type) params.type = filters.type;
       if (filters.difficulty) params.difficulty = filters.difficulty;
       if (searchKeyword) params.keyword = searchKeyword;
       const data = await getQuestions(params);
       setQuestions(data.items);
       setTotal(data.total);
+      setSelectedQuestionIds((selectedIds) => selectedIds.filter((questionId) => (
+        data.items.some((question) => question.questionId === questionId)
+      )));
     } catch (err) {
       console.error("加载题目失败:", err);
     } finally {
@@ -119,16 +128,19 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
     loadQuestions();
   }, [loadQuestions]);
 
-  const updateFilter = (key, value) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
+  const updateFilter = useCallback((key, value) => {
+    setFilters((prev) => key === "subject"
+      ? { ...prev, subject: value, chapter: "", knowledgePoint: "" }
+      : { ...prev, [key]: value }
+    );
     setPage(1);
-  };
+  }, []);
 
-  const clearFilters = () => {
-    setFilters({ subject: "", grade: "", chapter: "", type: "", difficulty: "", lessonId: "" });
+  const clearFilters = useCallback(() => {
+    setFilters({ subject: "", grade: "", chapter: "", knowledgePoint: "", type: "", difficulty: "", lessonId: "" });
     setSearchKeyword("");
     setPage(1);
-  };
+  }, []);
 
   // 导入 Excel / Word / PDF
   const handleImportFile = async (e) => {
@@ -142,6 +154,7 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
       setPage(1);
       // 导入后的新题按创建时间排在最前面
       await loadQuestions(1);
+      await refreshFilterOptions();
     } catch (err) {
       setImportResult({ inserted: 0, failed: 1, errors: [err.message] });
     } finally {
@@ -263,10 +276,49 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
     }
   };
 
+  const toggleQuestionSelection = (questionId) => {
+    setSelectedQuestionIds((selectedIds) => selectedIds.includes(questionId)
+      ? selectedIds.filter((id) => id !== questionId)
+      : [...selectedIds, questionId]
+    );
+  };
+
+  const toggleSelectCurrentPage = () => {
+    const currentPageIds = questions.map((question) => question.questionId);
+    const allSelected = currentPageIds.every((questionId) => selectedQuestionIds.includes(questionId));
+    setSelectedQuestionIds(allSelected ? [] : currentPageIds);
+  };
+
+  const handleBatchDeleteQuestions = async () => {
+    if (selectedQuestionIds.length === 0 || batchDeleting) return;
+    const targetIds = [...selectedQuestionIds];
+    setBatchDeleting(true);
+    try {
+      const results = await Promise.allSettled(targetIds.map((questionId) => deleteQuestion(questionId)));
+      const failedIds = targetIds.filter((_, index) => results[index].status === "rejected");
+      const deletedCount = targetIds.length - failedIds.length;
+      const remainingTotal = Math.max(0, total - deletedCount);
+      const targetPage = Math.min(page, Math.max(1, Math.ceil(remainingTotal / 20)));
+      setPage(targetPage);
+      await loadQuestions(targetPage);
+      await refreshFilterOptions();
+      setSelectedQuestionIds(failedIds);
+      setShowBatchDelete(false);
+      setActionNotice(failedIds.length === 0
+        ? `已批量删除 ${deletedCount} 道题目`
+        : `已删除 ${deletedCount} 道题目，另有 ${failedIds.length} 道删除失败，请重试`
+      );
+    } catch (err) {
+      setActionNotice(err.message || "批量删除题目失败");
+    } finally {
+      setBatchDeleting(false);
+    }
+  };
+
   const hasActiveFilters = Object.values(filters).some(Boolean);
 
   // 筛选面板
-  const FilterPanel = () => (
+  const filterPanelElement = useMemo(() => (
     <div className="space-y-5">
       {/* 标题 */}
       <div className="flex items-center justify-between">
@@ -342,6 +394,35 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
         </FilterSection>
       )}
 
+      {/* 知识点（与题库动态同步，可按科目收窄） */}
+      {(filters.subject
+        ? filterOptions?.knowledgePointsBySubject?.[filters.subject]?.length > 0
+        : filterOptions?.knowledgePoints?.length > 0) && (
+        <FilterSection
+          title="知识点"
+          expanded={expandedSection === "knowledgePoint"}
+          onToggle={() => setExpandedSection(expandedSection === "knowledgePoint" ? "" : "knowledgePoint")}
+        >
+          <div className="flex max-h-40 flex-wrap gap-2 overflow-y-auto pr-1">
+            {(filters.subject
+              ? filterOptions.knowledgePointsBySubject[filters.subject]
+              : filterOptions.knowledgePoints
+            ).map((point) => (
+              <FilterChip
+                key={point.value}
+                active={filters.knowledgePoint === point.value}
+                onClick={() => updateFilter(
+                  "knowledgePoint",
+                  filters.knowledgePoint === point.value ? "" : point.value
+                )}
+              >
+                {point.label}
+              </FilterChip>
+            ))}
+          </div>
+        </FilterSection>
+      )}
+
       {/* 题型 */}
       <FilterSection
         title="题型"
@@ -383,7 +464,7 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
         </div>
       </FilterSection>
     </div>
-  );
+  ), [filters, filterOptions, expandedSection, clearFilters, updateFilter, hasActiveFilters]);
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -436,6 +517,16 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
           className="flex items-center gap-1.5 px-4 py-2.5 bg-white border border-indigo-200 rounded-xl text-sm font-medium text-indigo-600 hover:bg-indigo-50 transition-colors cursor-pointer"
         >
           <Plus size={16} /> 新增题目
+        </button>
+
+        {/* 批量删除题目 */}
+        <button
+          onClick={() => setShowBatchDelete(true)}
+          disabled={selectedQuestionIds.length === 0 || batchDeleting}
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-white border border-red-200 rounded-xl text-sm font-medium text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 transition-colors cursor-pointer"
+          title={selectedQuestionIds.length === 0 ? "请先勾选需要删除的题目" : `删除已选中的 ${selectedQuestionIds.length} 道题目`}
+        >
+          <Trash2 size={16} /> 批量删除{selectedQuestionIds.length > 0 ? ` (${selectedQuestionIds.length})` : ""}
         </button>
 
         {/* 导入题目 */}
@@ -499,7 +590,7 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
         {/* 左侧筛选面板 - 桌面端 */}
         <div className="hidden lg:block w-56 flex-shrink-0">
           <div className="sticky top-4 bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
-            <FilterPanel />
+            {filterPanelElement}
           </div>
         </div>
 
@@ -508,7 +599,7 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
           <div className="fixed inset-0 z-50 lg:hidden">
             <div className="absolute inset-0 bg-black/40" onClick={() => setShowMobileFilter(false)} />
             <div className="absolute right-0 top-0 h-full w-72 bg-white shadow-xl p-5 overflow-y-auto">
-              <FilterPanel />
+              {filterPanelElement}
             </div>
           </div>
         )}
@@ -526,14 +617,25 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
             </div>
           ) : (
             <>
-              <div className="text-sm text-slate-500 mb-3">
-                共 {total} 道题目
+              <div className="mb-3 flex items-center justify-between gap-3 text-sm text-slate-500">
+                <span>共 {total} 道题目</span>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={questions.length > 0 && questions.every((question) => selectedQuestionIds.includes(question.questionId))}
+                    onChange={toggleSelectCurrentPage}
+                    className="h-4 w-4 rounded border-slate-300 text-indigo-500 focus:ring-indigo-400"
+                  />
+                  全选当前页
+                </label>
               </div>
               <div className="space-y-3">
                 {questions.map((q) => (
                   <QuestionListItem
                     key={q.questionId}
                     question={q}
+                    selected={selectedQuestionIds.includes(q.questionId)}
+                    onToggleSelect={() => toggleQuestionSelection(q.questionId)}
                     onStart={() => onStartPractice?.(q)}
                     onEdit={() => openEditEditor(q.questionId)}
                     onDelete={() => setDeleteTarget(q)}
@@ -590,6 +692,15 @@ export default function QuestionBankPage({ onStartPractice, lessonId = "" }) {
           onConfirm={handleDeleteQuestion}
         />
       )}
+
+      {showBatchDelete && (
+        <BatchDeleteQuestionDialog
+          count={selectedQuestionIds.length}
+          deleting={batchDeleting}
+          onCancel={() => !batchDeleting && setShowBatchDelete(false)}
+          onConfirm={handleBatchDeleteQuestions}
+        />
+      )}
     </div>
   );
 }
@@ -626,7 +737,7 @@ function FilterChip({ active, onClick, children }) {
 }
 
 /** 题目列表项 */
-function QuestionListItem({ question, onStart, onEdit, onDelete }) {
+function QuestionListItem({ question, selected, onToggleSelect, onStart, onEdit, onDelete }) {
   const typeLabels = {
     single_choice: "单选",
     multi_choice: "多选",
@@ -637,8 +748,15 @@ function QuestionListItem({ question, onStart, onEdit, onDelete }) {
   const difficulty = Math.max(1, Math.min(5, Number(question.difficulty) || 1));
 
   return (
-    <div className="group rounded-2xl border border-slate-100 bg-white px-5 py-5 shadow-sm transition-all hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md">
+    <div className={`group rounded-2xl bg-white px-5 py-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${selected ? "border border-indigo-300 ring-1 ring-indigo-100" : "border border-slate-100 hover:border-indigo-200"}`}>
       <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          aria-label={`选择题目：${question.title || question.content?.stem || question.questionId}`}
+          className="mt-1.5 h-4 w-4 flex-shrink-0 rounded border-slate-300 text-indigo-500 focus:ring-indigo-400 cursor-pointer"
+        />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <span className="px-2 py-0.5 rounded-md text-xs font-medium bg-indigo-50 text-indigo-600">
@@ -656,9 +774,9 @@ function QuestionListItem({ question, onStart, onEdit, onDelete }) {
               <span className="rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-600">待完善</span>
             )}
           </div>
-          <p className="line-clamp-2 text-[15px] leading-7 text-slate-700">
-            {question.content.stem}
-          </p>
+          <div className="line-clamp-2 text-[15px] leading-7 text-slate-700">
+            <MathText>{question.content.stem}</MathText>
+          </div>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1.5">
           <button
@@ -852,6 +970,33 @@ function DeleteQuestionDialog({ question, deleting, onCancel, onConfirm }) {
           <button onClick={onCancel} disabled={deleting} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50 cursor-pointer">取消</button>
           <button onClick={onConfirm} disabled={deleting} className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50 cursor-pointer">
             {deleting ? "删除中..." : "确认删除"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BatchDeleteQuestionDialog({ count, deleting, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/45" onClick={onCancel} />
+      <div role="alertdialog" aria-modal="true" aria-labelledby="batch-delete-question-title" className="relative w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-500">
+          <Trash2 size={20} />
+        </div>
+        <h2 id="batch-delete-question-title" className="text-lg font-bold text-slate-800">
+          确认批量删除 {count} 道题目？
+        </h2>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          删除后无法直接恢复；已有答题记录的题目会由系统归档，以保留历史统计。
+        </p>
+        <div className="mt-6 flex justify-end gap-3">
+          <button onClick={onCancel} disabled={deleting} className="rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50 cursor-pointer">
+            取消
+          </button>
+          <button onClick={onConfirm} disabled={deleting || count === 0} className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white hover:bg-red-600 disabled:opacity-50 cursor-pointer">
+            {deleting ? "批量删除中..." : "确认批量删除"}
           </button>
         </div>
       </div>
