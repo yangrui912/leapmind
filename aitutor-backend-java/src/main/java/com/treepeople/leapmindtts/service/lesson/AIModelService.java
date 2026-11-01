@@ -28,7 +28,7 @@ import java.util.Objects;
  * @ Description:
  * @ Date：2025/7/14  22:33
  */
-@Service
+@Service("lessonAIModelService")
 @Slf4j
 public class AIModelService {
     // 阿里云百炼平台API端点

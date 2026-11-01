@@ -26,6 +26,8 @@ import { StreamingPlayback } from '../../features/virtualTeacher/streamingPlayba
 import { fetchSegments } from '../../features/chat/pptApi.js';
 import { streamVirtualTeacherSpeech, fetchTeacherPreference, DEFAULT_TEACHER_AVATARS } from '../../services/virtualTeacherService.js';
 import { sharedViewer } from '../../features/vrmViewer/viewerContext.js';
+// develop 侧增量：M4 讲课交互事件上报（M6 事件采集）
+import { recordLectureInteraction } from '../../services/learningEventService';
 import { Flag, BookOpen, MessageCircle, Monitor, User, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const TABS = [
@@ -208,6 +210,28 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
     return () => mq.removeEventListener?.('change', onChange);
   }, []);
 
+  // develop 侧增量：M6 讲课交互事件采集（replay/complete 埋点）
+  const interactionSequenceRef = useRef(0);
+  const interactionSessionRef = useRef(
+    lectureData?.sessionId
+      || `lecture-${lectureId}-${globalThis.crypto?.randomUUID?.() || Date.now()}`,
+  );
+
+  const fireEvent = useCallback((action, chapterId) => {
+    if (!lectureId) return;
+    interactionSequenceRef.current += 1;
+    const sessionId = interactionSessionRef.current;
+    recordLectureInteraction({
+      userId,
+      lectureId,
+      chapterId: chapterId || `ch${currentSlide}`,
+      action,
+      interactionId: `${sessionId}:${interactionSequenceRef.current}`,
+      sessionId,
+      kpId: lectureData?.knowledgePoints?.[0]?.id,
+    }).catch(error => console.warn('[M4][M6] 讲课交互事件上报失败:', error.message));
+  }, [currentSlide, lectureData?.knowledgePoints, lectureId, userId]);
+
   // 加载已保存的教师偏好（后端优先，本地降级；均不可用则使用内置默认形象）
   useEffect(() => {
     let active = true;
@@ -218,10 +242,12 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
   }, []);
 
   // 幻灯片切换回调：接收页码 + 真实 slide 元数据（A3：远程回退需要真实字段）
+  // 并入 develop 侧增量：回退翻页时上报 M6 replay 事件
   const handleSlideChange = useCallback((pageNum, slideMeta) => {
+    if (pageNum < currentSlide) fireEvent('replay', `ch${pageNum}`);
     setCurrentSlide(pageNum);
     if (slideMeta) setRemoteSlideMeta(slideMeta);
-  }, []);
+  }, [currentSlide, fireEvent]);
 
   // B1 + M8 FINAL + FINAL.1: 真实播放生命周期 —— 预生成 / 流式统一由 LectureSpeechAdapter 管辖。
   // A3: 不臆断"远程 = 有音频"；start() 内部先探测 fetchSegments，再按真实文本回退。
@@ -286,13 +312,16 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
 
   // mock 模式下的翻页 handler
   const handleMockPrev = useCallback(() => {
-    setCurrentSlide(prev => Math.max(1, prev - 1));
-  }, []);
+    handleSlideChange(Math.max(1, currentSlide - 1));
+  }, [currentSlide, handleSlideChange]);
   const handleMockNext = useCallback(() => {
     setCurrentSlide(prev => Math.min((mockSlides?.length || 1), prev + 1));
   }, [mockSlides]);
 
-  const handleEndLecture = () => setShowEndPanel(true);
+  const handleEndLecture = () => {
+    fireEvent('complete', `ch${currentSlide}`);
+    setShowEndPanel(true);
+  };
 
   const handleGoPractice = () => {
     onFinish?.({ lectureId, knowledgePoints: lectureData?.knowledgePoints });

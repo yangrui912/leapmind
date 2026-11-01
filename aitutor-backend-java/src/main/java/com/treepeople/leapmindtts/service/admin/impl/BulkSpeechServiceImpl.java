@@ -1,12 +1,16 @@
 package com.treepeople.leapmindtts.service.admin.impl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.treepeople.leapmindtts.mapper.AudioSegmentMapper;
+import com.treepeople.leapmindtts.mapper.TeachingContentMapper;
 import com.treepeople.leapmindtts.pojo.dto.*;
 import com.treepeople.leapmindtts.pojo.entity.AudioSegment;
 import com.treepeople.leapmindtts.pojo.entity.LessonSession;
+import com.treepeople.leapmindtts.pojo.entity.TeachingContent;
 import com.treepeople.leapmindtts.service.admin.BulkSpeechCache;
 import com.treepeople.leapmindtts.service.admin.BulkSpeechService;
 import com.treepeople.leapmindtts.service.admin.LessonSessionService;
+import com.treepeople.leapmindtts.service.impl.TtsBatchServiceImpl;
 import com.treepeople.leapmindtts.service.lesson.*;
 import com.treepeople.leapmindtts.util.SegmentIndexingStrategy;
 import com.treepeople.leapmindtts.util.WavMergeUtil;
@@ -61,11 +65,10 @@ public class BulkSpeechServiceImpl implements BulkSpeechService {
     private final AIModelService aiModelService;
     private final LessonSessionService lessonSessionService;
     private final BulkSpeechCache bulkSpeechCache;
-
-    @Override
-    public BulkSynthesisResponse processBulkSynthesis(BulkSynthesisRequest request) {
-        return processBulkSynthesis(request, null);
-    }
+    private final NarrationBridgeService narrationBridgeService;
+    private final TtsBatchServiceImpl ttsBatchService;
+    private final TeachingContentMapper teachingContentMapper;
+    private final ObjectMapper objectMapper;
 
     @Override
     public BulkSynthesisResponse processBulkSynthesis(BulkSynthesisRequest request, Long userId) {
@@ -174,6 +177,74 @@ public class BulkSpeechServiceImpl implements BulkSpeechService {
                     .message("处理失败: " + e.getMessage())
                     .startTime(startTime)
                     .build();
+        }
+    }
+
+    @Override
+    public BulkSynthesisResponse processBulkSynthesis(BulkSynthesisRequest request, String userJwt) {
+        LocalDateTime startTime = LocalDateTime.now();
+        String courseId = Optional.ofNullable(request.getCourseId())
+                .filter(s -> !s.isBlank()).orElse(generateCourseId());
+        long prepIdN = courseIdToPrepId(courseId);
+        log.info("[新体系] 批量语音合成，courseId={} prepId={} title={} slides={} userJwt 存在={}",
+                courseId, prepIdN, request.getTitle(),
+                request.getSlides() != null ? request.getSlides().size() : 0,
+                userJwt != null && !userJwt.isBlank());
+
+        try {
+            List<BulkSynthesisRequest.SlideData> sorted = request.getSlides() == null ? List.of()
+                    : request.getSlides().stream()
+                    .filter(s -> s != null && s.getPageNumber() != null)
+                    .sorted(Comparator.comparing(BulkSynthesisRequest.SlideData::getPageNumber))
+                    .collect(Collectors.toList());
+            if (sorted.isEmpty()) {
+                return BulkSynthesisResponse.builder()
+                        .courseId(courseId).status("FAILED").message("slides 为空")
+                        .startTime(startTime).build();
+            }
+            int totalContentPoints = sorted.stream()
+                    .mapToInt(s -> s.getContentPoints() != null ? s.getContentPoints().size() : 0).sum();
+
+            // 1) 老请求 → 新结构，首写 DB
+            PptStructureDTO structure = convertBulkRequestToStructure(request, sorted);
+            saveOrUpdateTeachingContent(prepIdN, request.getTitle(),
+                    objectMapper.writeValueAsString(structure), courseId);
+
+            // 2) 公共一键 TTS：收集 narration → 3 并发 M8 → [AUDIO_URL:] 回填 → 回写 DB
+            int[] success = {0};
+            success[0] = ttsBatchService.generateAndBackfill(structure, prepIdN, userJwt, p -> {
+                log.debug("[新体系] TTS 进度 {}/{} slide={} status={}",
+                        p.getCurrentIndex(), p.getTotalCount(), p.getCurrentTitle(), p.getStatus());
+            });
+
+            // 3) lesson_session 状态兼容现有管理后台展示
+            try {
+                if (voiceDatabaseService.getCompleteSessionInfo(courseId) == null) {
+                    voiceDatabaseService.createCompleteSession(
+                            courseId, request.getTitle(), originalTextFromStructure(structure), null, new ArrayList<>());
+                }
+                updateSessionStatus(courseId, "SYNTHESIZED", "SYSTEM",
+                        LocalDateTime.now(), "新体系合成，跳过审核");
+            } catch (Exception e) {
+                log.warn("创建 lesson_session 展示记录失败(不影响主链路)，courseId={} err={}",
+                        courseId, e.getMessage());
+            }
+
+            return BulkSynthesisResponse.builder()
+                    .courseId(courseId)
+                    .status("COMPLETED")
+                    .totalSlides(sorted.size())
+                    .totalContentPoints(totalContentPoints)
+                    .message(String.format("新体系合成完成 %d 页，成功生成 %d 条旁白音频", sorted.size(), success[0]))
+                    .startTime(startTime)
+                    .build();
+
+        } catch (Exception e) {
+            log.error("[新体系] 批量合成失败 courseId={}", courseId, e);
+            return BulkSynthesisResponse.builder()
+                    .courseId(courseId).status("FAILED")
+                    .message("处理失败: " + e.getMessage())
+                    .startTime(startTime).build();
         }
     }
 
@@ -560,65 +631,170 @@ public class BulkSpeechServiceImpl implements BulkSpeechService {
         return WavMergeUtil.estimateDurationMs(audioData);
     }
 
+    // ================================================================
+    //  新体系辅助方法
+    // ================================================================
+
+    /** courseId → prepId：数字型直接转；否则取 hashCode 绝对值作为稳定伪 ID */
+    private long courseIdToPrepId(String courseId) {
+        if (courseId == null || courseId.isBlank()) return 0L;
+        try { return Long.parseLong(courseId.trim()); }
+        catch (NumberFormatException e) {
+            return Math.abs((long) courseId.hashCode()) | 0x10000000L; // 高位打标，避免与真实 ID 撞
+        }
+    }
+
+    /**
+     * 将老 BulkSynthesisRequest（slides:[{page_number,title,content_points[]}]）
+     * 转成新体系 PptStructureDTO。
+     *  notes = 标题 + 要点拼接（模拟 Python narration_text：整页一段话）
+     *  bulletPoints = content_points
+     *  imageSuggestion / highlightPoints = 尽量从 options 取，没有就留空
+     */
+    private PptStructureDTO convertBulkRequestToStructure(
+            BulkSynthesisRequest req, List<BulkSynthesisRequest.SlideData> sorted) {
+
+        PptStructureDTO structure = new PptStructureDTO();
+        structure.setTitle(req.getTitle() != null ? req.getTitle() : "未命名PPT");
+
+        List<PptStructureDTO.SlideDTO> slides = new ArrayList<>(sorted.size());
+        for (BulkSynthesisRequest.SlideData s : sorted) {
+            PptStructureDTO.SlideDTO sd = new PptStructureDTO.SlideDTO();
+            sd.setPageNum(s.getPageNumber());
+            sd.setTitle(s.getTitle() != null ? s.getTitle() : "");
+            sd.setType(s.getType() != null ? s.getType() : "content");
+            sd.setBulletPoints(s.getContentPoints() != null ? s.getContentPoints() : List.of());
+
+            // 页面 narration：标题 + 要点 拼起来 → notes
+            StringBuilder notes = new StringBuilder();
+            if (s.getTitle() != null && !s.getTitle().isBlank()) notes.append(s.getTitle()).append("。\n");
+            if (s.getContentPoints() != null && !s.getContentPoints().isEmpty()) {
+                for (int i = 0; i < s.getContentPoints().size(); i++) {
+                    String pt = s.getContentPoints().get(i);
+                    if (pt == null || pt.isBlank()) continue;
+                    notes.append(i + 1).append("、").append(pt);
+                    if (!pt.endsWith("。") && !pt.endsWith("！") && !pt.endsWith("？")
+                            && !pt.endsWith(".") && !pt.endsWith("!") && !pt.endsWith("?")) {
+                        notes.append("。");
+                    }
+                    notes.append("\n");
+                }
+            }
+            sd.setNotes(notes.toString().trim());
+
+            // 可选字段：如果 SlideData 提供了对应字段则填充（新 BulkSynthesisRequest 暂时没有，留空）
+            sd.setImageSuggestion("");
+            sd.setFormula("");
+            sd.setHighlightPoints(List.of());
+            sd.setInteraction(null);
+            slides.add(sd);
+        }
+        structure.setSlides(slides);
+        return structure;
+    }
+
+    /** 同 prep_id 幂等：有则 update，无则 insert。courseId 写入 userId 占位（避免非空约束） */
+    private void saveOrUpdateTeachingContent(long prepId, String title, String pptJson, String courseId) {
+        TeachingContent exist = null;
+        try { exist = teachingContentMapper.selectByPrepId(prepId); } catch (Exception ignore) {}
+        if (exist != null) {
+            exist.setPptStructure(pptJson);
+            if (title != null) exist.setTitle(title);
+            // createdAt 自动填充，不覆盖
+            teachingContentMapper.updateById(exist);
+            log.debug("[新体系] 更新 teaching_contents id={} prepId={}", exist.getId(), prepId);
+        } else {
+            TeachingContent nc = TeachingContent.builder()
+                    .prepId(prepId)
+                    .userId(courseIdToUserId(courseId))
+                    .title(title != null ? title : "未命名PPT")
+                    .status("published")
+                    .pptStructure(pptJson)
+                    .build();
+            teachingContentMapper.insert(nc);
+            log.debug("[新体系] 插入 teaching_contents id={} prepId={}", nc.getId(), prepId);
+        }
+    }
+
+    private Long courseIdToUserId(String courseId) {
+        // userId 占位：如果课程里不带用户，用 0 或取 courseId 的 hash 做稳定值；
+        // 项目有全局默认用户 ID 时可在这里换成配置值
+        if (courseId == null) return 0L;
+        return Math.abs((long) courseId.hashCode()) % 9_999_999L + 1L;
+    }
+
+    /** 从 PptStructureDTO 收集 NarrationTask（跳过空 notes、跳过已有 AUDIO_URL 前缀） */
+    private List<TtsBatchServiceImpl.NarrationTask> collectNarrationTasks(PptStructureDTO structure) {
+        if (structure.getSlides() == null) return List.of();
+        List<TtsBatchServiceImpl.NarrationTask> tasks = new ArrayList<>();
+        for (int i = 0; i < structure.getSlides().size(); i++) {
+            PptStructureDTO.SlideDTO s = structure.getSlides().get(i);
+            String n = s.getNotes();
+            if (n == null || n.isBlank()) continue;
+            if (n.startsWith("[AUDIO_URL:")) continue;
+            tasks.add(new TtsBatchServiceImpl.NarrationTask(i, n, s.getTitle()));
+        }
+        return tasks;
+    }
+
+    /** 将生成的 {pageIndex, audioUrl} 回填到 structure.slides[i].notes（前缀 + 原文） */
+    private void applyAudioUrlsToStructure(PptStructureDTO structure, Map<Integer, String> audioUrls) {
+        if (structure.getSlides() == null || audioUrls == null || audioUrls.isEmpty()) return;
+        for (Map.Entry<Integer, String> e : audioUrls.entrySet()) {
+            int idx = e.getKey();
+            String url = e.getValue();
+            if (idx < 0 || idx >= structure.getSlides().size()) continue;
+            PptStructureDTO.SlideDTO s = structure.getSlides().get(idx);
+            String notes = s.getNotes() == null ? "" : s.getNotes();
+            String stripped;
+            if (notes.startsWith("[AUDIO_URL:")) {
+                int newLine = notes.indexOf('\n');
+                stripped = newLine < 0 ? "" : notes.substring(newLine + 1).trim();
+            } else {
+                stripped = notes;
+            }
+            s.setNotes("[AUDIO_URL:" + url + "]\n" + stripped);
+        }
+    }
+
+    /** 给 lesson_session.original_text 生成全文（保持原有展示列表的搜索能力） */
+    private String originalTextFromStructure(PptStructureDTO s) {
+        if (s.getSlides() == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (PptStructureDTO.SlideDTO sd : s.getSlides()) {
+            int pn = sd.getPageNum() != null ? sd.getPageNum() : sb.toString().split("\n第").length;
+            sb.append("第").append(pn).append("页: ");
+            if (sd.getTitle() != null) sb.append(sd.getTitle());
+            sb.append("\n");
+            if (sd.getBulletPoints() != null) {
+                for (String p : sd.getBulletPoints()) sb.append("- ").append(p).append("\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
     @Override
     public List<PPTAudioSegment> getPageAudioSegments(String courseId, Integer pageNumber) {
-        log.info("获取页面音频片段，会话ID: {}, 页码: {}", courseId, pageNumber);
-        return pageLevelAudioService.getPageAudioSegments(courseId, pageNumber);
+        log.info("[新体系] 获取页面音频片段，会话ID: {}, 页码: {}", courseId, pageNumber);
+        // 统一走新体系 NarrationBridge（内部读 teaching_contents.slides[].notes [AUDIO_URL:]）
+        return narrationBridgeService.getSegments(courseId, pageNumber);
     }
 
     @Override
     public PPTAudioSegment getAudioSegment(String courseId, Integer segmentIndex) {
-        log.info("获取音频片段，会话ID: {}, 片段索引: {}", courseId, segmentIndex);
-        return pageLevelAudioService.getAudioSegmentInfoByGlobalIndex(courseId, segmentIndex);
+        log.warn("[新体系] 不支持按全局片段索引取单条（1页=1段，索引=pageNumber-1），courseId={} segmentIndex={}",
+                courseId, segmentIndex);
+        // 兼容：1段=1页 → 把 segmentIndex 当 pageNumber-1 查，没找到返回 null
+        List<PPTAudioSegment> page = getPageAudioSegments(courseId, segmentIndex + 1);
+        return (page != null && !page.isEmpty()) ? page.get(0) : null;
     }
 
     @Override
     public PPTAudioInfo getPPTAudioInfo(String courseId) {
-        log.info("获取PPT音频信息，会话ID: {}", courseId);
-
-        // 获取会话基本信息
-        LessonSession session = voiceDatabaseService.getCompleteSessionInfo(courseId);
-        if (session == null) {
-            log.warn("未找到会话信息，会话ID: {}", courseId);
-            return null;
-        }
-
-        // 获取所有页面音频
-        List<AudioSegment> pageAudios = pageLevelAudioService.getSessionPageAudios(courseId);
-
-        // 构建页面信息
-        List<PPTAudioInfo.PPTPageInfo> pages = pageAudios.stream()
-                .map(pageAudio -> PPTAudioInfo.PPTPageInfo.builder()
-                        .pageNumber(pageAudio.getSlidePageNumber())
-                        .pageTitle(pageAudio.getSlideTitle())
-                        .slideType(pageAudio.getSlideType())
-                        .segmentCount(pageAudio.getSegmentCount())
-                        .pageDuration(pageAudio.getDuration())
-                        .build())
-                .sorted(Comparator.comparing(PPTAudioInfo.PPTPageInfo::getPageNumber))
-                .collect(Collectors.toList());
-
-        // 获取统计信息
-        long[] stats = pageLevelAudioService.getSessionAudioStats(courseId);
-        long totalAudioSize = stats[0];
-        long totalDuration = stats[1];
-        long totalSegments = stats[2];
-
-        PPTAudioInfo audioInfo = PPTAudioInfo.builder()
-                .courseId(courseId)
-                .title(session.getTitle())
-                .totalPages(pages.size())
-                .totalSegments((int) totalSegments)
-                .totalDuration(totalDuration)
-                .totalAudioSize(totalAudioSize)
-                .pages(pages)
-                .createdAt(session.getCreatedAt())
-                .build();
-
-        log.info("PPT音频信息获取成功，会话ID: {}, 总页数: {}, 总片段数: {}",
-                courseId, audioInfo.getTotalPages(), audioInfo.getTotalSegments());
-
-        return audioInfo;
+        log.info("[新体系] 获取PPT音频信息，会话ID: {}", courseId);
+        // 统一走新体系 NarrationBridge 统计
+        return narrationBridgeService.getInfo(courseId);
     }
 
     //1
@@ -629,204 +805,120 @@ public class BulkSpeechServiceImpl implements BulkSpeechService {
 
     @Override
     public BulkPreprocessingResponse processBulkPreprocessing(BulkSynthesisRequest request, Long userId) {
-        String courseId = (request.getCourseId() != null && !request.getCourseId().isBlank())
-                ? request.getCourseId() : generateCourseId();
-
+        // 【新体系 · 预处理】
+        // 只把 PPT 内容转 PptStructureDTO → 写入 teaching_contents(prep_id=courseId)，不调 TTS。
+        // 仍然把 lesson_session 置为 PENDING_REVIEW，给现有管理后台的"待审核列表"保持一致展示。
+        String courseId = Optional.ofNullable(request.getCourseId())
+                .filter(s -> !s.isBlank()).orElse(generateCourseId());
+        long prepIdN = courseIdToPrepId(courseId);
         LocalDateTime startTime = LocalDateTime.now();
-
-        log.info("开始批量文本预处理，会话ID: {}, PPT标题: {}, slides数量: {}",
-                courseId, request.getTitle(), request.getSlides().size());
+        log.info("[新体系] 批量文本预处理，courseId={} prepId={} title={} slides={}",
+                courseId, prepIdN, request.getTitle(),
+                request.getSlides() != null ? request.getSlides().size() : 0);
 
         try {
-            // 1. 按页码排序slides，处理null值
-            List<BulkSynthesisRequest.SlideData> sortedSlides = request.getSlides().stream()
-                    .filter(slide -> slide != null && slide.getPageNumber() != null)
+            List<BulkSynthesisRequest.SlideData> sorted = request.getSlides() == null ? List.of()
+                    : request.getSlides().stream()
+                    .filter(s -> s != null && s.getPageNumber() != null)
                     .sorted(Comparator.comparing(BulkSynthesisRequest.SlideData::getPageNumber))
                     .collect(Collectors.toList());
-
-            log.info("排序后的slides数量: {}", sortedSlides.size());
-
-            // 2. 创建会话（DRAFT状态）
-            String originalText = buildOriginalText(sortedSlides);
-            boolean sessionCreated = voiceDatabaseService.createCompleteSession(
-                    courseId, request.getTitle(), originalText, null, new ArrayList<>(), userId);
-
-            if (!sessionCreated) {
-                log.error("创建会话失败，会话ID: {}", courseId);
+            if (sorted.isEmpty()) {
                 return BulkPreprocessingResponse.builder()
-                        .courseId(courseId)
-                        .status("FAILED")
-                        .message("创建会话失败")
-                        .startTime(startTime)
-                        .endTime(LocalDateTime.now())
-                        .build();
+                        .courseId(courseId).status("FAILED").message("slides 为空")
+                        .startTime(startTime).endTime(LocalDateTime.now()).build();
             }
 
-            // 3. 更新会话状态为DRAFT
-            updateSessionStatus(courseId, "DRAFT", null, null, null);
+            PptStructureDTO structure = convertBulkRequestToStructure(request, sorted);
+            String json = objectMapper.writeValueAsString(structure);
+            saveOrUpdateTeachingContent(prepIdN, request.getTitle(), json, courseId);
 
-            // 4. 处理所有slides（只进行文本预处理，不生成音频）
-            int totalTextSegments = 0;
-            StringBuilder polishedTextBuilder = new StringBuilder();
+            int totalTextSegments = sorted.size();   // 1 页 = 1 段 narration
 
-            for (BulkSynthesisRequest.SlideData slide : sortedSlides) {
-                try {
-                    SlideTextProcessResult result = processSlideTextOnlyWithPolishedText(courseId, slide, request.getOptions());
-                    totalTextSegments += result.getSegmentCount();
-
-                    // 收集润色后的文本
-                    if (result.getPolishedText() != null && !result.getPolishedText().trim().isEmpty()) {
-                        polishedTextBuilder.append("第").append(slide.getPageNumber()).append("页: ")
-                                .append(slide.getTitle()).append("\n");
-                        polishedTextBuilder.append(result.getPolishedText()).append("\n\n");
-                    }
-
-                    log.info("处理slide文本完成，页码: {}, 生成文本片段数: {}", slide.getPageNumber(), result.getSegmentCount());
-                } catch (Exception e) {
-                    log.error("处理slide文本失败，页码: {}", slide.getPageNumber(), e);
-                    // 继续处理其他slides
+            // 保留 lesson_session 展示记录
+            try {
+                if (voiceDatabaseService.getCompleteSessionInfo(courseId) == null) {
+                    String original = originalTextFromStructure(structure);
+                    voiceDatabaseService.createCompleteSession(
+                            courseId, request.getTitle(), original, null, new ArrayList<>());
                 }
+                updateSessionStatus(courseId, "DRAFT", null, null, null);
+                updateSessionStatus(courseId, "PENDING_REVIEW", null, null, null);
+            } catch (Exception e) {
+                log.warn("创建 lesson_session 展示记录失败(不影响新体系主链路) courseId={} err={}",
+                        courseId, e.getMessage());
             }
-
-            // 5. 更新会话的润色文本
-            if (polishedTextBuilder.length() > 0) {
-                try {
-                    boolean updated = voiceDatabaseService.updateSessionPolishedText(courseId, polishedTextBuilder.toString());
-                    if (updated) {
-                        log.info("更新会话润色文本成功，会话ID: {}, 文本长度: {}", courseId, polishedTextBuilder.length());
-                    } else {
-                        log.warn("更新会话润色文本失败，会话ID: {}", courseId);
-                    }
-                } catch (Exception e) {
-                    log.error("更新会话润色文本异常，会话ID: {}", courseId, e);
-                }
-            }
-
-            // 6. 更新会话状态为PENDING_REVIEW
-            updateSessionStatus(courseId, "PENDING_REVIEW", null, null, null);
-
-            log.info("批量文本预处理完成，会话ID: {}, 总文本片段数: {}", courseId, totalTextSegments);
 
             return BulkPreprocessingResponse.builder()
                     .courseId(courseId)
                     .status("SUCCESS")
-                    .totalSlides(sortedSlides.size())
+                    .totalSlides(sorted.size())
                     .totalTextSegments(totalTextSegments)
-                    .message("文本预处理完成，等待审核")
+                    .message("新体系文本预处理完成，等待审核后执行合成")
                     .startTime(startTime)
                     .endTime(LocalDateTime.now())
                     .build();
 
         } catch (Exception e) {
-            log.error("批量文本预处理失败，会话ID: {}", courseId, e);
+            log.error("[新体系] 批量预处理失败 courseId={}", courseId, e);
             return BulkPreprocessingResponse.builder()
-                    .courseId(courseId)
-                    .status("FAILED")
+                    .courseId(courseId).status("FAILED")
                     .message("处理失败: " + e.getMessage())
-                    .startTime(startTime)
-                    .endTime(LocalDateTime.now())
+                    .startTime(startTime).endTime(LocalDateTime.now())
                     .build();
         }
     }
 
     @Override
-    public BulkSynthesisResponse executeBulkSynthesis(String courseId) {
+    public BulkSynthesisResponse executeBulkSynthesis(String courseId, String userJwt) {
         LocalDateTime startTime = LocalDateTime.now();
-
-        log.info("开始执行批量语音合成，会话ID: {}", courseId);
+        long prepIdN = courseIdToPrepId(courseId);
+        log.info("[新体系] 审核后执行合成，courseId={} prepId={} userJwt 存在={}",
+                courseId, prepIdN, userJwt != null && !userJwt.isBlank());
 
         try {
-            // 1. 检查会话状态
             LessonSession session = voiceDatabaseService.getCompleteSessionInfo(courseId);
-            if (session == null) {
-                log.error("会话不存在，会话ID: {}", courseId);
+            if (session != null && !"APPROVED".equals(session.getProcessingStatus())) {
+                log.warn("[新体系] lesson_session 状态未 APPROVED，仍执行合成（新体系不依赖老状态机），status={}",
+                        session.getProcessingStatus());
+            }
+
+            TeachingContent tc = teachingContentMapper.selectByPrepId(prepIdN);
+            if (tc == null || tc.getPptStructure() == null || tc.getPptStructure().isBlank()) {
                 return BulkSynthesisResponse.builder()
-                        .courseId(courseId)
-                        .status("FAILED")
-                        .message("会话不存在")
-                        .startTime(startTime)
-                        .build();
+                        .courseId(courseId).status("FAILED")
+                        .message("未找到 PPT 结构数据，请先执行预处理").startTime(startTime).build();
             }
-
-            if (!"APPROVED".equals(session.getProcessingStatus())) {
-                log.error("会话状态不正确，当前状态: {}, 会话ID: {}", session.getProcessingStatus(), courseId);
+            PptStructureDTO structure = PptStructureDTO.parse(objectMapper, tc.getPptStructure());
+            if (structure.getSlides() == null || structure.getSlides().isEmpty()) {
                 return BulkSynthesisResponse.builder()
-                        .courseId(courseId)
-                        .status("FAILED")
-                        .message("会话状态不正确，当前状态: " + session.getProcessingStatus())
-                        .startTime(startTime)
-                        .build();
+                        .courseId(courseId).status("FAILED")
+                        .message("PPT 结构 slides 为空").startTime(startTime).build();
             }
 
-            // 2. 获取所有TEXT_ONLY状态的音频片段
-            List<AudioSegment> textOnlySegments = pageLevelAudioService.getTextOnlySegments(courseId);
-            if (textOnlySegments.isEmpty()) {
-                log.warn("未找到待合成的文本片段，会话ID: {}", courseId);
-                return BulkSynthesisResponse.builder()
-                        .courseId(courseId)
-                        .status("FAILED")
-                        .message("未找到待合成的文本片段")
-                        .startTime(startTime)
-                        .build();
-            }
+            int success = ttsBatchService.generateAndBackfill(structure, prepIdN, userJwt, p -> {
+                log.debug("[新体系] 执行合成进度 {}/{} slide={} status={}",
+                        p.getCurrentIndex(), p.getTotalCount(), p.getCurrentTitle(), p.getStatus());
+            });
 
-            // 3. 按页面分组处理
-            Map<Integer, List<AudioSegment>> segmentsByPage = textOnlySegments.stream()
-                    .collect(Collectors.groupingBy(AudioSegment::getSlidePageNumber));
-
-            int processedSegments = 0;
-            int totalSegments = textOnlySegments.size();
-            int failedSegments = 0;
-
-            for (Map.Entry<Integer, List<AudioSegment>> entry : segmentsByPage.entrySet()) {
-                Integer pageNumber = entry.getKey();
-                List<AudioSegment> pageSegments = entry.getValue();
-
-                try {
-                    int pageProcessedCount = synthesizePageAudio(courseId, pageNumber, pageSegments);
-                    processedSegments += pageProcessedCount;
-                    failedSegments += pageSegments.size() - pageProcessedCount;
-                    log.info("页面音频合成完成，页码: {}, 合成片段数: {}, 失败片段数: {}",
-                            pageNumber, pageProcessedCount, pageSegments.size() - pageProcessedCount);
-                } catch (Exception e) {
-                    log.error("页面音频合成失败，页码: {}", pageNumber, e);
-                    failedSegments += pageSegments.size();
-                    // 继续处理其他页面
-                }
-            }
-
-            // 4. 更新会话状态：全部成功才设为 SYNTHESIZED，部分失败设为 PARTIAL_SYNTHESIZED
-            if (failedSegments == 0) {
-                updateSessionStatus(courseId, "SYNTHESIZED", null, null, null);
-            } else {
-                updateSessionStatus(courseId, "PARTIAL_SYNTHESIZED", null, null,
-                        "部分片段合成失败: " + failedSegments + "/" + totalSegments);
-                log.warn("批量语音合成部分失败，会话ID: {}, 成功: {}, 失败: {}", courseId, processedSegments, failedSegments);
-            }
-
-            String message = failedSegments == 0
-                    ? "语音合成完成，生成 " + processedSegments + " 个音频片段"
-                    : "语音合成部分完成，成功 " + processedSegments + "/" + totalSegments + " 个片段，失败 " + failedSegments + " 个";
-
-            log.info("批量语音合成完成，会话ID: {}, 总合成片段数: {}, 失败: {}", courseId, processedSegments, failedSegments);
+            try { updateSessionStatus(courseId, "SYNTHESIZED", null, null, null); } catch (Exception ignore) {}
 
             return BulkSynthesisResponse.builder()
                     .courseId(courseId)
-                    .status(failedSegments == 0 ? "COMPLETED" : "PARTIAL_COMPLETED")
-                    .totalSlides(segmentsByPage.size())
-                    .totalContentPoints(processedSegments)
-                    .message(message)
+                    .status("COMPLETED")
+                    .totalSlides(structure.getSlides().size())
+                    .totalContentPoints(success)
+                    .message(success == 0
+                            ? "无待合成片段（已全部生成过或原文为空）"
+                            : String.format("执行合成完成，成功 %d 条", success))
                     .startTime(startTime)
                     .build();
 
         } catch (Exception e) {
-            log.error("批量语音合成失败，会话ID: {}", courseId, e);
+            log.error("[新体系] 执行合成失败 courseId={}", courseId, e);
             return BulkSynthesisResponse.builder()
-                    .courseId(courseId)
-                    .status("FAILED")
-                    .message("合成失败: " + e.getMessage())
-                    .startTime(startTime)
-                    .build();
+                    .courseId(courseId).status("FAILED")
+                    .message("执行合成失败: " + e.getMessage())
+                    .startTime(startTime).build();
         }
     }
 

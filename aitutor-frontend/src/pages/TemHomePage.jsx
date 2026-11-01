@@ -4,7 +4,7 @@ import { Star, ChevronRight, MessageCircle, ChevronDown, Sparkles } from "lucide
 import { useState, useRef, useLayoutEffect, useEffect } from "react"
 import { getAllStages, getGradesByStage } from '../services/educationService'
 import { getSections, SEMESTER } from '../services/courseService'
-import { getUserInfo, inferStageCodeFromGrade } from '../utils/tokenManager'
+import { getUserInfo, inferStageCodeFromGrade, saveUserInfo } from '../utils/tokenManager'
 import { getUserProfile } from '../services/authService'
 import { ApiError } from '../services/api'
 
@@ -56,7 +56,7 @@ export default function LearningApp({
   const lastDotRef = useRef(null)
 
   // API 数据状态
-  const [, setStages] = useState([]) // 教育阶段列表
+  const [stages, setStages] = useState([]) // 教育阶段列表
   const [selectedStage, setSelectedStage] = useState(null) // 选中的教育阶段
   const [grades, setGrades] = useState([]) // 年级列表
   const [selectedGrade, setSelectedGrade] = useState(null) // 选中的年级
@@ -700,21 +700,6 @@ export default function LearningApp({
                         />
                       ))}
                     </div>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        if (section.courseId) {
-                          onOpenTeacherAvatar?.(section.courseId)
-                        } else {
-                          showFeatureToast('课程ID缺失，无法进入虚拟教师课堂')
-                        }
-                      }}
-                      className="mr-3 shrink-0 rounded-full border border-cyan-200/40 bg-cyan-300/20 px-4 py-2 text-sm font-black text-cyan-50 transition hover:bg-cyan-300 hover:text-purple-950 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-cyan-200/60"
-                      aria-label={`使用虚拟教师讲解${section.title}`}
-                    >
-                      AI 教师
-                    </button>
                   </div>
                 </div>
                 ))
@@ -753,7 +738,9 @@ export default function LearningApp({
                   {/* 中间：文字（放大居中） */}
                   <div className="flex flex-col items-center justify-center flex-1">
                     <span className="text-5xl font-black text-white drop-shadow-2xl tracking-[0.15em] leading-none">AI</span>
-                    <span className="text-3xl font-bold text-white drop-shadow-xl tracking-[0.25em] leading-tight">讲 题</span>
+                    <span className="text-3xl font-bold text-white drop-shadow-xl tracking-[0.25em] leading-tight">
+                      {feature.title.replace(/^AI\s*/, '').split('').join(' ')}
+                    </span>
                     <div className="flex items-center gap-1.5 mt-1.5">
                       <div className="w-2 h-2 rounded-full bg-white/60" />
                       <div className="w-2 h-2 rounded-full bg-white/40" />

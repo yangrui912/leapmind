@@ -48,9 +48,9 @@ logging:
 # 阿里云语音识别配置
 asr:
   api:
-    key: ${ASR_API_KEY:}
+    key: 1NKi3NqL8jyXC8PK
   app:
-    key: ${ASR_APP_KEY:}
+    key: 1NKi3NqL8jyXC8PK # AppKey
   region: cn-shanghai # 阿里云区域
 
 # AI服务配置
@@ -61,21 +61,52 @@ ai:
   teaching:
     service-url: ${AI_TEACHING_SERVICE_URL:http://localhost:8000}
 
-# 阿里云TTS配置
+# 阿里云TTS配置 【M8 对接后 M5 不再直接调阿里云 TTS】
+# 保留此块是为了兼容老代码中 @Value("${tts.voice}") 等默认值读取（VirtualTeacherTtsService 用到）
 tts:
+  api-url: http://localhost:8080/api/virtual-teacher/tts
   api:
-    key: # 这个将通过TokenService动态获取
+    key: # 这个将通过TokenService动态获取（M5 不再用）
   app:
-    key: ${TTS_APP_KEY:}
-  voice: zhixiaoxia # 发音人配置
+    key: 1NKi3NqL8jyXC8PK
+  voice: zhixiaoxia # 发音人配置（作为 M8 音色默认值兜底）
+m8:
+  # M8 服务部署地址（不要带 /api 路径；如果 M8 和 M5 在同一个 Spring Boot 应用部署，
+  # 就填 M5 自己的 server.port 地址，当前项目 application.yml 顶部 server.port=8080，
+  # 所以默认值就是 http://localhost:8080，无需改）
+  base-url: ${M8_BASE_URL:http://localhost:8080}
 
+  # 【M8 对接修正：文档未给出固定内部服务 Token】
+  # 鉴权规则原文：请求头格式 Authorization: Bearer <token> ；
+  # token 需要由 M5 后台「用户登录鉴权」之后获取，通过 Controller 层把请求头
+  # Authorization: Bearer <token> 里的 token 部分取出，一路透传到 M8TtsClient.userJwt 参数。
+  # 不再使用「固定内部 Token」，所以此配置项废弃，保留仅为了避免 @Value 找不到报启动异常。
+  # 生产/开发都不需要设置环境变量 M8_INTERNAL_SERVICE_TOKEN。
+  internal-service-token: ${M8_INTERNAL_SERVICE_TOKEN:}
+
+  # HTTP 超时：connect-timeout 建立连接，read-timeout 等合成完成（M8 文档 synthesis-timeout=125s）
+  connect-timeout-ms: 10000
+  read-timeout-seconds: 125
+  retry-count: 3
+
+  # 默认音色 & 语速（M8 文档 voiceType / speed 字段）
+  default-voice: ${M8_DEFAULT_VOICE:zhixiaoxia}
+  default-speed: 1.0
+
+  # 单条文本最大字符数（M8 文档 500，超长时 M8TtsClient.synthesizeChunkedUrls 会自动切分句调多次）
+  single-text-max: 500
+  
+  voice: zhixiaoxia # 发音人配置
 # 阿里云AccessKey配置
 aliyun:
-  access-key-id: ${ALIYUN_ACCESS_KEY_ID:}
-  access-key-secret: ${ALIYUN_ACCESS_KEY_SECRET:}
+  access-key-id: LTAI5t9BuGenr8gDhn4uhcuN
+  access-key-secret: jSBcno7mVpZTAgvSlgIpu5f75mok1c
+#  用户登录名称 leapmind-test1@1808062431290363.onaliyun.com
+#  AccessKey ID LTAI5tKGcC3cuDmpMJgAVPji
+#  AccessKey Secret 1KUTUz13LT221pcJWL8sXviTZZ0hGd
   sms:
-    accessKeyId: ${ALIYUN_SMS_ACCESS_KEY_ID:}
-    accessKeySecret: ${ALIYUN_SMS_ACCESS_KEY_SECRET:}
+    accessKeyId: LTAI5tKGcC3cuDmpMJgAVPji
+    accessKeySecret: 1KUTUz13LT221pcJWL8sXviTZZ0hGd
     endpoint: dysmsapi.aliyuncs.com
     sMVCode:
       signName: 阿里云短信测试
@@ -122,20 +153,20 @@ text-polishing:
 baidu:
   speech:
     app:
-      id: ${BAIDU_SPEECH_APP_ID:}
+      id: 119539340 # 百度智能云应用ID
     api:
-      key: ${BAIDU_SPEECH_API_KEY:}
+      key: uILerVfsDTL7Qiu5kM118mHL # 百度智能云应用的API Key
     secret:
-      key: ${BAIDU_SPEECH_SECRET_KEY:}
+      key: GVoAUBS9IUioq6dp0P7AgijUfMV6vPGq # 百度智能云应用的Secret Key
     format: pcm # 音频格式
     rate: 16000 # 采样率
     dev:
       pid: 1537 # 语言模型ID
   # 为了兼容其他服务的配置键
   asr:
-    api-key: ${BAIDU_SPEECH_API_KEY:}
-    secret-key: ${BAIDU_SPEECH_SECRET_KEY:}
-    app-id: ${BAIDU_ASR_APP_ID:}
+    api-key: uILerVfsDTL7Qiu5kM118mHL
+    secret-key: GVoAUBS9IUioq6dp0P7AgijUfMV6vPGq
+    app-id: 6986539
 
 # 分段语音配置 (Segmented Speech Configuration)
 segmented-speech:
@@ -209,6 +240,30 @@ springdoc:
     operations-sorter: alpha
   default-flat-param-object: true
 
+# Python AI 薄弱点分析服务配置（LandPPT 服务，提供 AI 综合分析能力）
+weak-point:
+  python-service:
+    base-url: http://localhost:8000
+    analyze-endpoint: /api/weak-points/analyze
+    timeout: 30
+  # M3 薄弱点计算引擎（独立微服务，提供薄弱度计算/推荐/知识图谱/增量更新）
+  # ⚠️ 部署注意：localhost 适用于 Java 本地运行 + docker 端口映射场景。
+  #   如果 Java 也容器化（同 compose 网络），改为 http://m3-engine:8001
+  m3-engine:
+    base-url: http://localhost:8001
+    recommend-endpoint: /api/weak-points/recommend-questions
+    knowledge-graph-endpoint: /api/weak-points/knowledge-graph
+    incremental-update-endpoint: /api/weak-points/incremental-update
+    timeout: 30
+
+# M6 事件采集服务配置（薄弱点变化事件上报）
+event-collection:
+  enabled: true
+  base-url: http://192.168.1.19:8080
+  collect-endpoint: /api/events/collect
+  timeout: 10
+  max-retries: 1
+
 # Knife4j 美化文档
 knife4j:
   enable: true
@@ -216,6 +271,23 @@ knife4j:
     language: zh_cn
     enable-swagger-models: true
     enable-document-manage: true
+
+# [跨端联桥] Python AI 服务地址（对应 internal_ai.py 暴露的端口 8001）
+python:
+  service:
+    base-url: http://localhost:8001
+    connect-timeout: 30000
+    read-timeout: 180000
+
+# MinIO对象存储配置（PPT、音频文件上传使用）
+# MinIO文件存储配置
+minio:
+  endpoint: http://127.0.0.1:9000
+  access-key: minioadmin
+  secret-key: minioadmin
+  bucket-name: leapmind
+  # M4 即时讲课专用桶（与公共 bucket 隔离，见 M4_后端接口文档）
+  teaching-bucket: leapmind-teaching
 
 # M8 虚拟 AI 教师
 virtual-teacher:
@@ -234,15 +306,6 @@ virtual-teacher:
     access-key: ${MINIO_ACCESS_KEY:minioadmin}
     secret-key: ${MINIO_SECRET_KEY:minioadmin}
     bucket: ${MINIO_BUCKET:leapmind-tts}
-
-# M2 拍照搜题 MinIO 配置（MinioConfig 绑定 minio.*）
-minio:
-  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
-  access-key: ${MINIO_ACCESS_KEY:minioadmin}
-  secret-key: ${MINIO_SECRET_KEY:minioadmin}
-  bucket-name: ${MINIO_BUCKET:leapmind-tts}
-  # M4 即时讲课专用桶（与公共 bucket 隔离）
-  teaching-bucket: ${MINIO_TEACHING_BUCKET:leapmind-teaching}
 
 # M2 OCR 配置（provider: baidu / aliyun）
 ocr:
@@ -264,10 +327,20 @@ bulk-speech:
     requests-per-minute: ${BULK_SPEECH_REQUESTS_PER_MINUTE:30}
     daily-characters: ${BULK_SPEECH_DAILY_CHARACTERS:50000}
 
+
 # Python AI 服务配置（复习计算、事件处理）
+m6:
+  profile-engine:
+    enabled: true
+    projection-enabled: true
+    base-url: http://localhost:8000
+    build-profile-path: /api/internal/ai/build-profile
+    projection-interval-ms: 30000
+
 python-service:
-  base-url: ${PYTHON_SERVICE_BASE_URL:http://localhost:8000}
+  base-url: http://localhost:8001
   review-calculation-path: /api/review/calculate-all
   event-process-path: /api/events/process
+  build-profile-path: /api/internal/ai/build-profile
   connect-timeout: 30
   read-timeout: 300

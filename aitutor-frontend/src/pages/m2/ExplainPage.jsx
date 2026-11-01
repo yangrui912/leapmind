@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ArrowLeft, Sparkles, ChevronDown, ChevronUp, ChevronLeft, ChevronRight,
   RefreshCw, Target, BookOpen, ThumbsUp, HelpCircle, Clock, History
@@ -7,7 +7,9 @@ import StepProgress from '../../components/m2/StepProgress'
 import ExplainContent from '../../components/m2/ExplainContent'
 import VoicePlayButton from '../../components/m2/VoicePlayButton'
 import AskMoreButton from '../../components/m2/AskMoreButton'
+// main 侧：真实讲题 API；develop 侧：M6 画像事件上报
 import { generateExplain, getWrongQuestions, getExplainDetail } from '../../services/m2'
+import { createDeterministicEventId, recordLearningEvent } from '../../services/learningEventService'
 import { getUserInfo } from '../../utils/tokenManager'
 
 const scrollbarStyles = `
@@ -120,6 +122,11 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
   const [feedback, setFeedback] = useState(null)
   const [toast, setToast] = useState(null)
   const [replayLoading, setReplayLoading] = useState(false)
+  const [explainId, setExplainId] = useState(null)
+  const [repeatCount, setRepeatCount] = useState(0)
+  const explainIdRef = useRef(null)
+  const repeatCountRef = useRef(0)
+  // userId 统一取组件顶部 getUserInfo()?.userId || 1（develop 侧重复声明已并入）
 
   // 回放模式：加载历史讲题数据
   useEffect(() => {
@@ -170,6 +177,10 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
     setTip('')
     setSimilar('')
     setFeedback(null)
+    setExplainId(null)
+    setRepeatCount(0)
+    explainIdRef.current = null
+    repeatCountRef.current = 0
     setQuestionExpanded(true)
     setLoading(false)
   }, [])
@@ -190,6 +201,10 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
     setSimilar('')
 
     const steps = []
+    const currentRepeatCount = explainIdRef.current ? repeatCountRef.current + 1 : 0
+    repeatCountRef.current = currentRepeatCount
+    setRepeatCount(currentRepeatCount)
+    const occurredAt = new Date().toISOString()
 
     await generateExplain(
       {
@@ -213,6 +228,23 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
         } else if (chunk.type === 'similar') {
           setSimilar(chunk.content)
         } else if (chunk.type === 'done') {
+          const completedExplainId = String(chunk.explainId ?? '')
+          if (completedExplainId) {
+            explainIdRef.current = completedExplainId
+            setExplainId(completedExplainId)
+            recordLearningEvent({
+              eventId: createDeterministicEventId(
+                'm2-request',
+                `${completedExplainId}:${currentRepeatCount}`,
+              ),
+              userId,
+              eventType: 'request_explanation',
+              sourceModule: 'M2',
+              occurredAt,
+              kpId: selectedQuestion.knowledgePoints?.[0]?.id,
+              data: { explainId: completedExplainId, reasonTag: 'WRONG_ANSWER' },
+            }).catch(error => console.warn('[M2][M6] 请求讲解事件上报失败:', error.message))
+          }
           setDone(true)
           setGenerating(false)
         }
@@ -221,13 +253,29 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
         setGenerating(false)
       }
     )
-  }, [selectedQuestion])
+  }, [selectedQuestion, userId])
 
   useEffect(() => {
     if (selectedQuestion && !generating && explainSteps.length === 0 && !replayId) {
       handleGenerate()
     }
   }, [selectedQuestion])
+
+  const handleFeedback = useCallback((value) => {
+    setFeedback(value)
+    if (!explainId) return
+    recordLearningEvent({
+      eventId: createDeterministicEventId(
+        'm2-feedback',
+        `${explainId}:${repeatCount}:${value}`,
+      ),
+      userId,
+      eventType: 'explanation_feedback',
+      sourceModule: 'M2',
+      kpId: selectedQuestion?.knowledgePoints?.[0]?.id,
+      data: { explainId, feedback: value, repeatCount },
+    }).catch(error => console.warn('[M2][M6] 讲解反馈事件上报失败:', error.message))
+  }, [explainId, repeatCount, selectedQuestion, userId])
 
   const allSteps = explainSteps.length >= 2 ? explainSteps : null
   const stepLabels = allSteps
@@ -415,7 +463,7 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
                   <div className="mt-4 space-y-3">
                     <div className="flex gap-3">
                       <button
-                        onClick={() => setFeedback('understood')}
+                        onClick={() => handleFeedback('understood')}
                         className={`flex-1 py-3 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${
                           feedback === 'understood'
                             ? 'bg-green-500/30 text-green-300 border border-green-400/30'
@@ -426,9 +474,9 @@ export default function ExplainPage({ onBack, replayId, onExplainHistory }) {
                         懂了
                       </button>
                       <button
-                        onClick={() => setFeedback('confused')}
+                        onClick={() => handleFeedback('still_confused')}
                         className={`flex-1 py-3 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2 ${
-                          feedback === 'confused'
+                          feedback === 'still_confused'
                             ? 'bg-yellow-500/30 text-yellow-300 border border-yellow-400/30'
                             : 'bg-white/10 text-white/70 hover:bg-white/20 border border-white/10'
                         }`}

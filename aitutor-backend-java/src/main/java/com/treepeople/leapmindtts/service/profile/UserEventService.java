@@ -35,4 +35,11 @@ public interface UserEventService {
      * @return 每条事件的处理结果
      */
     List<EventResult> batch(Long userId, List<JsonNode> events, HttpServletRequest request);
+
+    /**
+     * 内部事件记录（绕过 HTTP 鉴权）
+     * <p>供后端服务层在业务事务完成后发布 M6 画像事件使用，
+     * 例如 markAsReviewed → publish mark_reviewed。</p>
+     */
+    EventAck recordInternal(LearningEventRequest event);
 }

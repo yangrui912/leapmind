@@ -3,10 +3,15 @@ import { fileURLToPath, URL } from 'node:url'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-// https://vite.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const javaApi = env.JAVA_API_TARGET  || 'http://localhost:8080'
+  const javaApi = env.JAVA_API_TARGET || 'http://localhost:8080'
+
+  const javaProxy = {
+    target: javaApi,
+    changeOrigin: true,
+    secure: false,
+  }
 
   return {
     plugins: [react(), tailwindcss()],
@@ -17,6 +22,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        // 代理条目取并集：main 与 develop 指向同一后端（JAVA_API_TARGET，默认 8080），
+        // main 侧路径集合为 develop 的超集（多 /api/questions），保留 main 明细写法
         // PPT & 业务（Java 后端）
         '/api/speech': {
           target: javaApi,

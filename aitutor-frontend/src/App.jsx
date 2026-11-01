@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';  
 import GlobalStyles from './styles/GlobalStyles.jsx';
 import LoginPage from './pages/LoginPage';
 import LoginPage2 from './pages/LoginPage2.jsx';
@@ -6,6 +6,7 @@ import ProjectListPage from './pages/ProjectListPage';
 import LecturePage from './pages/LecturePage';
 import TemHomePage from './pages/TemHomePage';
 import ProfilePage from './pages/ProfilePage.jsx';
+import TeacherAvatarPage from './pages/TeacherAvatarPage.jsx';
 import PhotoQAPage from './pages/m2/PhotoQAPage';
 import ExplainPage from './pages/m2/ExplainPage';
 import ExplainHistoryPage from './pages/m2/ExplainHistoryPage';
@@ -18,10 +19,12 @@ import LecturePresentPage from './pages/lecture/LecturePresentPage';
 import { mockPPTStructure } from './data/mockLecture';
 // M1 做题页
 import PracticePage from './pages/PracticePage.jsx';
+import QuestionBankPage from './pages/QuestionBankPage.jsx';
+import WrongQuestionBookPage from './pages/WrongQuestionBookPage.jsx';
+import StatisticsPage from './pages/StatisticsPage.jsx';
+import RankingPage from './pages/RankingPage.jsx';
 import { hasValidToken } from './utils/tokenManager';
 import { checkAuth } from './services/authService';
-
-const TeacherAvatarPage = lazy(() => import('./pages/TeacherAvatarPage.jsx'));
 
 export default function App() {
     const [isChecking, setIsChecking] = useState(true);
@@ -30,13 +33,12 @@ export default function App() {
     const [guestRoute, setGuestRoute] = useState('home'); // home | profile
     const [showProfile, setShowProfile] = useState(false);
     const [showTeacherAvatar, setShowTeacherAvatar] = useState(false);
-    const [teacherCourseId, setTeacherCourseId] = useState('');
     const [m2Page, setM2Page] = useState(null); // null | 'photo-qa' | 'explain' | 'explain-history'
     const [m2Params, setM2Params] = useState({}); // 传递给 M2 页面的参数
     const [learningProfileView, setLearningProfileView] = useState(null); // null | overview | detail
     const [selectedKnowledgePointId, setSelectedKnowledgePointId] = useState(null);
     const [m4Page, setM4Page] = useState(null); // null | 'active' — M4 讲课全屏容器
-    const [m1Page, setM1Page] = useState(null); // null | 'practice' — M1 做题页
+    const [m1Page, setM1Page] = useState(null); // null | practice | question-bank | mistakes | statistics | ranking
     const [m1PracticeParams, setM1PracticeParams] = useState({}); // M1 做题页参数（mode/lessonId 等）
 
     useEffect(() => {
@@ -98,8 +100,55 @@ export default function App() {
             <GlobalStyles />
             {m4Page === 'active' ? (
                 <M4LectureContainer onExit={handleExitM4} />
-            ) : m1Page === 'practice' ? (
-                <PracticePage onBack={() => { setM1Page(null); setM1PracticeParams({}); }} mode={m1PracticeParams.mode} lessonId={m1PracticeParams.lessonId || ""} />
+            ) : m1Page ? (
+                <div className="flex flex-col w-full h-full bg-slate-50">
+                    <header className="shrink-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-4 flex-wrap shadow-sm">
+                        <button
+                            type="button"
+                            onClick={() => { setM1Page(null); setM1PracticeParams({}); }}
+                            className="px-3 py-2 text-sm text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer"
+                        >
+                            ← 返回首页
+                        </button>
+                        <nav className="flex items-center gap-1 flex-wrap" aria-label="做题模块导航">
+                            {[
+                                ['practice', '开始做题'],
+                                ['question-bank', '题库'],
+                                ['mistakes', '错题本'],
+                                ['statistics', '统计'],
+                                ['ranking', '排行榜'],
+                            ].map(([page, label]) => (
+                                <button
+                                    type="button"
+                                    key={page}
+                                    onClick={() => setM1Page(page)}
+                                    className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors cursor-pointer ${m1Page === page ? 'bg-indigo-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                                >
+                                    {label}
+                                </button>
+                            ))}
+                        </nav>
+                    </header>
+                    <main className="flex-1 min-h-0 overflow-auto p-4">
+                        {m1Page === 'practice' ? (
+                            <PracticePage
+                                embedded
+                                mode={m1PracticeParams.mode}
+                                lessonId={m1PracticeParams.lessonId || ""}
+                                initialParams={m1PracticeParams}
+                                onViewStatistics={() => setM1Page('statistics')}
+                            />
+                        ) : m1Page === 'question-bank' ? (
+                            <QuestionBankPage onStartPractice={handleLaunchM1} lessonId={m1PracticeParams.lessonId || ""} />
+                        ) : m1Page === 'mistakes' ? (
+                            <WrongQuestionBookPage onRedo={() => handleLaunchM1({ mode: 'MISTAKE_REDO' })} />
+                        ) : m1Page === 'statistics' ? (
+                            <StatisticsPage />
+                        ) : (
+                            <RankingPage />
+                        )}
+                    </main>
+                </div>
             ) : isChecking ? (
                 <div className="m-auto text-slate-600">检查会话中…</div>
             ) : !isAuthed ? (
@@ -142,30 +191,19 @@ export default function App() {
                     onBack={() => setLearningProfileView(null)}
                     onOpenKnowledgePoint={handleOpenKnowledgePoint}
                 />
-            ) : showTeacherAvatar ? (
-                <Suspense fallback={<div className="m-auto text-slate-600">正在加载虚拟教师课堂…</div>}>
-                    <TeacherAvatarPage
-                        courseId={teacherCourseId}
-                        onBack={() => {
-                            setShowTeacherAvatar(false);
-                            setTeacherCourseId('');
-                        }}
-                    />
-                </Suspense>
             ) : (
-                showProfile ? (
+                showTeacherAvatar ? (
+                    <TeacherAvatarPage onBack={() => setShowTeacherAvatar(false)} />
+                ) : showProfile ? (
                     <ProfilePage onBack={() => setShowProfile(false)} />
                 ) : (
                     <div className="relative w-full h-full">
                     <TemHomePage 
                         onEnterProject={(courseId) => setCurrentCourseId(courseId)}
                         onOpenProfile={handleOpenProfile}
+                        onOpenTeacherAvatar={() => setShowTeacherAvatar(true)}
                         onM2PhotoQa={() => setM2Page('photo-qa')}
                         onM2Explain={() => { setM2Params({}); setM2Page('explain'); }}
-                        onOpenTeacherAvatar={(courseId = '') => {
-                            setTeacherCourseId(courseId);
-                            setShowTeacherAvatar(true);
-                        }}
                         onOpenLearningProfile={handleOpenLearningProfile}
                         onM1Practice={handleLaunchM1}
                     />

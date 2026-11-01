@@ -6,7 +6,7 @@
  * - 单题操作：查看解析、重做、删除、标记重点
  * - 批量操作：批量重做
  */
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Search,
   RotateCcw,
@@ -16,56 +16,114 @@ import {
   AlertCircle,
   CheckCircle2,
   Clock,
-  Calendar,
-  Tag,
-  ChevronDown,
 } from "lucide-react";
 import { getWrongQuestions, toggleFocus, deleteWrongQuestion } from "../services/practiceService";
 
-export default function WrongQuestionBookPage({ onRedo, onExplain }) {
+const SUBJECT_LABELS = {
+  math: "数学",
+  chinese: "语文",
+  english: "英语",
+  physics: "物理",
+  chemistry: "化学",
+  biology: "生物",
+  computer: "计算机",
+  general: "通用",
+};
+
+export default function WrongQuestionBookPage({ onRedo }) {
   const [questions, setQuestions] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [statusFilter, setStatusFilter] = useState(""); // unresolved / reviewing / resolved
   const [selectedIds, setSelectedIds] = useState([]);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [subjectFilter, setSubjectFilter] = useState("");
   const [kpFilter, setKpFilter] = useState("");
   const [timeFilter, setTimeFilter] = useState("all");
+  const [filterSource, setFilterSource] = useState([]);
+  const [expandedIds, setExpandedIds] = useState([]);
 
-  useEffect(() => {
-    loadData();
-  }, [statusFilter, subjectFilter, kpFilter, timeFilter]);
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     try {
       const params = {};
-      if (statusFilter) params.status = statusFilter;
+      if (statusFilter && statusFilter !== "favorite") params.status = statusFilter;
+      if (statusFilter === "favorite") params.size = 1000;
       if (searchKeyword) params.keyword = searchKeyword;
       if (subjectFilter) params.subject = subjectFilter;
       if (kpFilter) params.kpName = kpFilter;
       if (timeFilter !== "all") params.timeRange = timeFilter;
       const data = await getWrongQuestions(params);
-      setQuestions(data.items);
-      setTotal(data.total);
+      const items = statusFilter === "favorite"
+        ? data.items.filter((question) => question.isKeyFocus)
+        : data.items;
+      setQuestions(items);
+      setTotal(statusFilter === "favorite" ? items.length : data.total);
     } catch (err) {
       console.error("加载错题失败:", err);
+      setQuestions([]);
+      setTotal(0);
+      setLoadError(err.message || "错题本加载失败，请检查后端服务后重试");
     } finally {
       setLoading(false);
     }
-  };
+  }, [kpFilter, searchKeyword, statusFilter, subjectFilter, timeFilter]);
+
+  const loadFilterSource = useCallback(async () => {
+    try {
+      const data = await getWrongQuestions({ size: 1000 });
+      setFilterSource(data.items);
+    } catch (err) {
+      console.error("加载错题筛选项失败:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    loadFilterSource();
+  }, [loadFilterSource]);
 
   const handleToggleFocus = async (id) => {
-    await toggleFocus(id);
-    setQuestions((prev) =>
-      prev.map((q) => (q.id === id ? { ...q, isKeyFocus: !q.isKeyFocus } : q))
+    const question = questions.find((item) => item.id === id);
+    const focused = !question?.isKeyFocus;
+    const result = await toggleFocus(id, focused);
+    if (!result.success) {
+      setLoadError(`重点状态保存失败：${result.reason || "请稍后重试"}`);
+      return;
+    }
+    setLoadError("");
+    setQuestions((prev) => statusFilter === "favorite"
+      ? prev.filter((item) => item.id !== id)
+      : prev.map((item) => (item.id === id ? { ...item, isKeyFocus: focused } : item))
+    );
+    setFilterSource((prev) => prev.map((item) => (
+      item.id === id ? { ...item, isKeyFocus: focused } : item
+    )));
+    if (statusFilter === "favorite") setTotal((prev) => Math.max(0, prev - 1));
+  };
+
+  const toggleExplanation = (id) => {
+    setExpandedIds((prev) => prev.includes(id)
+      ? prev.filter((item) => item !== id)
+      : [...prev, id]
     );
   };
 
   const handleDelete = async (id) => {
-    await deleteWrongQuestion(id);
+    const result = await deleteWrongQuestion(id);
+    if (!result.success) {
+      setLoadError(`删除失败：${result.reason || "请稍后重试"}`);
+      return;
+    }
+    setLoadError("");
     setQuestions((prev) => prev.filter((q) => q.id !== id));
+    setFilterSource((prev) => prev.filter((q) => q.id !== id));
+    setTotal((prev) => Math.max(0, prev - 1));
   };
 
   const handleBatchRedo = () => {
@@ -91,6 +149,7 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
     { value: "unresolved", label: "未解决", icon: AlertCircle },
     { value: "reviewing", label: "复习中", icon: Clock },
     { value: "resolved", label: "已解决", icon: CheckCircle2 },
+    { value: "favorite", label: "收藏", icon: Star },
   ];
 
   const reasonLabels = {
@@ -100,6 +159,22 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
     method_wrong: { label: "方法错误", color: "bg-purple-50 text-purple-600" },
   };
 
+  const subjectOptions = useMemo(() => (
+    [...new Set(filterSource.map((question) => question.subject).filter(Boolean))]
+      .sort((a, b) => (SUBJECT_LABELS[a] || a).localeCompare(SUBJECT_LABELS[b] || b, "zh-CN"))
+      .map((value) => ({ value, label: SUBJECT_LABELS[value] || value }))
+  ), [filterSource]);
+
+  const knowledgePointOptions = useMemo(() => (
+    [...new Set(
+      filterSource
+        .filter((question) => !subjectFilter || question.subject === subjectFilter)
+        .flatMap((question) => question.knowledgePoints || [])
+        .map((point) => point.name?.trim())
+        .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b, "zh-CN"))
+  ), [filterSource, subjectFilter]);
+
   return (
     <div className="max-w-5xl mx-auto">
       {/* 标题 & 统计 */}
@@ -108,7 +183,7 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
           <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
             <BookOpen size={22} className="text-indigo-500" /> 错题本
           </h1>
-          <p className="text-sm text-slate-500 mt-1">共 {total} 道错题</p>
+          <p className="text-sm text-slate-500 mt-1">共 {total} 道{statusFilter === "favorite" ? "收藏" : "错题"}</p>
         </div>
 
         {/* 批量操作 */}
@@ -141,24 +216,28 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
       <div className="flex items-center gap-2 mb-3 flex-wrap">
         <select
           value={subjectFilter}
-          onChange={(e) => setSubjectFilter(e.target.value)}
+          onChange={(e) => {
+            setSubjectFilter(e.target.value);
+            setKpFilter("");
+          }}
+          disabled={subjectOptions.length === 0}
           className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-600 outline-none focus:border-indigo-300 cursor-pointer"
         >
-          <option value="">全部科目</option>
-          <option value="math">数学</option>
-          <option value="chinese">语文</option>
-          <option value="english">英语</option>
-          <option value="physics">物理</option>
+          <option value="">{subjectOptions.length > 0 ? "全部科目" : "暂无科目"}</option>
+          {subjectOptions.map((subject) => (
+            <option key={subject.value} value={subject.value}>{subject.label}</option>
+          ))}
         </select>
         <select
           value={kpFilter}
           onChange={(e) => setKpFilter(e.target.value)}
+          disabled={knowledgePointOptions.length === 0}
           className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-600 outline-none focus:border-indigo-300 cursor-pointer"
         >
-          <option value="">全部知识点</option>
-          <option value="勾股定理">勾股定理</option>
-          <option value="相似三角形">相似三角形</option>
-          <option value="等腰三角形性质">等腰三角形性质</option>
+          <option value="">{knowledgePointOptions.length > 0 ? "全部知识点" : "暂无知识点"}</option>
+          {knowledgePointOptions.map((knowledgePoint) => (
+            <option key={knowledgePoint} value={knowledgePoint}>{knowledgePoint}</option>
+          ))}
         </select>
         <div className="flex items-center gap-0.5 p-0.5 bg-slate-100 rounded-lg">
           {[
@@ -190,6 +269,15 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
         />
       </div>
 
+      {loadError && (
+        <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          <span className="flex items-center gap-2"><AlertCircle size={17} />{loadError}</span>
+          <button onClick={loadData} className="cursor-pointer rounded-lg bg-white px-3 py-1.5 font-medium text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100">
+            重新加载
+          </button>
+        </div>
+      )}
+
       {/* 列表 */}
       {loading ? (
         <div className="flex justify-center py-16">
@@ -198,8 +286,8 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
       ) : questions.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <BookOpen size={48} className="mx-auto mb-3 opacity-40" />
-          <p className="text-lg font-medium">暂无错题</p>
-          <p className="text-sm mt-1">去练习几道题吧！</p>
+          <p className="text-lg font-medium">{statusFilter === "favorite" ? "暂无收藏" : "暂无错题"}</p>
+          <p className="text-sm mt-1">{statusFilter === "favorite" ? "点击题目右侧的星星即可收藏。" : "去练习几道题吧！"}</p>
         </div>
       ) : (
         <div className="space-y-3">
@@ -277,7 +365,7 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
                     onClick={() => handleToggleFocus(q.id)}
                     className={`p-2 rounded-lg cursor-pointer transition-colors
                       ${q.isKeyFocus ? "text-amber-500 bg-amber-50" : "text-slate-400 hover:text-amber-500 hover:bg-amber-50"}`}
-                    title="标记重点"
+                    title={q.isKeyFocus ? "取消收藏" : "收藏"}
                   >
                     <Star size={16} fill={q.isKeyFocus ? "currentColor" : "none"} />
                   </button>
@@ -289,8 +377,8 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
                     <RotateCcw size={16} />
                   </button>
                   <button
-                    onClick={() => onExplain?.(q)}
-                    className="p-2 text-slate-400 hover:text-violet-500 hover:bg-violet-50 rounded-lg cursor-pointer transition-colors"
+                    onClick={() => toggleExplanation(q.id)}
+                    className={`p-2 rounded-lg cursor-pointer transition-colors ${expandedIds.includes(q.id) ? "bg-violet-50 text-violet-500" : "text-slate-400 hover:text-violet-500 hover:bg-violet-50"}`}
                     title="查看讲解"
                   >
                     <BookOpen size={16} />
@@ -304,6 +392,12 @@ export default function WrongQuestionBookPage({ onRedo, onExplain }) {
                   </button>
                 </div>
               </div>
+              {expandedIds.includes(q.id) && (
+                <div className="ml-7 mt-3 rounded-xl border border-violet-100 bg-violet-50/60 p-4 text-sm">
+                  <div className="font-medium text-violet-700">标准答案：{q.correctAnswer || "暂无"}</div>
+                  <p className="mt-2 leading-6 text-slate-600">{q.explanation || "这道题暂时没有录入解析。"}</p>
+                </div>
+              )}
             </div>
           ))}
         </div>

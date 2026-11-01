@@ -56,6 +56,7 @@ function percentage(value, fallback = 0) {
   return Math.min(100, Math.max(0, numberValue(value, fallback)));
 }
 
+// main 侧：后端 masteryScore 为 0~1 小数（DECIMAL(5,4)），0~1 区间需 ×100 归一为百分比
 function masteryPercentage(value, fallback = 0) {
   const normalized = numberValue(value, fallback);
   return percentage(normalized >= 0 && normalized <= 1 ? normalized * 100 : normalized, fallback);
@@ -340,7 +341,8 @@ function normalizeSummary(source, fallback) {
     weeklyGoalProgress: percentage(pick(summary, ['weeklyGoalProgress', 'goalProgress'], fallback.weeklyGoalProgress), fallback.weeklyGoalProgress),
     completedCourses: numberValue(pick(summary, ['completedCourses', 'courseCount', 'finishedCourses'], fallback.completedCourses), fallback.completedCourses),
     completedExercises: numberValue(pick(summary, ['completedExercises', 'exerciseCount', 'questionCount'], fallback.completedExercises), fallback.completedExercises),
-    message: pick(summary, ['message', 'insight', 'suggestion', 'summaryText', 'summaryProfile'], fallback.message),
+    // 后端 ProfileView 的字段名是 summaryProfile，优先取用
+    message: pick(summary, ['summaryProfile', 'message', 'insight', 'suggestion', 'summaryText'], fallback.message),
   };
 }
 
@@ -433,8 +435,8 @@ function normalizeKnowledgeNode(item, index, fallbackSubject = '') {
   const mastery = masteryPercentage(pick(item, ['mastery', 'masteryScore', 'masteryRate', 'score', 'progress', 'value'], 0));
   const children = collectionFrom(item, ['children', 'knowledgePoints', 'nodes', 'items']);
   const id = pick(item, ['id', 'kpId', 'knowledgePointId', 'pointId', 'knowledgeId', 'code'], `knowledge-${index + 1}`);
-  const name = pick(item, ['name', 'knowledgePointName', 'pointName', 'title'], `\u77e5\u8bc6\u70b9 ${id}`);
   const subject = pick(item, ['subject', 'subjectName', 'courseName', 'category'], fallbackSubject);
+  const name = pick(item, ['kpName', 'name', 'knowledgePointName', 'pointName', 'title'], `\u77e5\u8bc6\u70b9${id}`);
 
   return {
     id: String(id),
@@ -450,7 +452,9 @@ function normalizeKnowledgeNode(item, index, fallbackSubject = '') {
 }
 
 function normalizeKnowledgeTree(source, fallback) {
-  const raw = collectionFrom(source, ['knowledgeTree', 'knowledge', 'knowledgeStatus', 'knowledgeStatuses', 'knowledgePoints', 'statuses', 'records', 'list', 'items']);
+  // 后端 FullProfile/KnowledgeStatusResponse 的知识列表字段是 knowledge；
+  // fallback 可能为 null（字段级回退策略），需判空而非直接 clone
+  const raw = collectionFrom(source, ['knowledge', 'knowledgeTree', 'knowledgeStatus', 'knowledgeStatuses', 'knowledgePoints', 'statuses', 'records', 'list', 'items']);
   if (!raw.length) return fallback ? clone(fallback) : [];
 
   const nodes = raw.map((item, index) => normalizeKnowledgeNode(item, index));
@@ -568,17 +572,43 @@ function deriveTimelineFromProfile(source, fallback) {
 }
 
 function normalizeTimeline(source, fallback) {
-  const raw = collectionFrom(source, ['timeline', 'learningTimeline', 'recentActivities', 'activities', 'learningRecords']);
+  // develop 侧新增 events（M6 事件时间线）键；fallback 可能为 null，需判空
+  const raw = collectionFrom(source, ['events', 'timeline', 'learningTimeline', 'recentActivities', 'activities', 'learningRecords']);
   if (!raw.length) return fallback ? clone(fallback) : [];
 
+  const moduleNames = { M1:'\u7b54\u9898\u7ec3\u4e60', M2:'AI\u8bb2\u9898', M3:'\u8584\u5f31\u68c0\u6d4b', M4:'\u77e5\u8bc6\u56fe\u8c31', M5:'\u5907\u8bfe\u6750\u6599', M6:'\u590d\u4e60\u504f\u597d', M7:'\u5b66\u4e60\u7b54\u7591' };
+  const eventLabels = { answer_question:'\u7b54\u9898', finish_practice:'\u5b8c\u6210\u7ec3\u4e60', request_explanation:'\u8bf7\u6c42\u8bb2\u89e3', explanation_feedback:'\u8bb2\u89e3\u53cd\u9988', weak_point_changed:'\u8584\u5f31\u70b9\u53d8\u5316', lecture_interact:'\u8bfe\u5802\u4e92\u52a8', lesson_material_used:'\u5907\u8bfe\u6750\u6599', ask_doubt:'\u63d0\u95ee', mark_reviewed:'\u590d\u4e60\u6807\u8bb0', preference_changed:'\u504f\u597d\u53d8\u66f4' };
+  const reasonLabels = { WRONG_ANSWER:'\u7b54\u9519\u540e\u8bb2\u89e3', REPEATED_ERROR:'\u53cd\u590d\u9519\u8bef', USER_REQUEST:'\u4e3b\u52a8\u63d0\u95ee', LOW_CONFIDENCE:'\u4fe1\u5fc3\u4e0d\u8db3', REVIEW_NEEDED:'\u590d\u4e60\u9700\u8981' };
+  const feedbackLabels = { understood:'\u5df2\u7406\u89e3', partly_understood:'\u90e8\u5206\u7406\u89e3', still_confused:'\u4ecd\u56f0\u60d1' };
+  const weakReasonLabels = { ACCURACY_DROP:'\u6b63\u786e\u7387\u4e0b\u964d', REPEATED_ERROR:'\u53cd\u590d\u9519\u8bef', TEACHER_MARKED:'\u6559\u5e08\u6807\u8bb0', RECALCULATED:'\u91cd\u65b0\u8ba1\u7b97' };
+
+  function formatEventDesc(item) {
+    const raw = item.description || item.event_data || '';
+    let data = raw;
+    try { data = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch(e) {}
+    const kpId = item.kp_id || (typeof data === 'object' && data?.kpId) || '';
+    const kpStr = kpId ? `\u77e5\u8bc6\u70b9${kpId}` : '';
+    const eventType = item.event_type || '';
+    try {
+      const d = typeof data === 'string' ? JSON.parse(data) : data;
+      if (eventType === 'answer_question') return `${kpStr} ${d.isCorrect ? '\u56de\u7b54\u6b63\u786e' : '\u56de\u7b54\u9519\u8bef'}\uff0c\u96be\u5ea6${d.difficulty || '?'}\uff0c\u7528\u65f6${d.timeSpentSec || '?'}\u79d2`;
+      if (eventType === 'finish_practice') return `${kpStr} \u5b8c\u6210${d.questionCount || '?'}\u9898\uff0c\u6b63\u786e\u7387${Math.round((d.accuracy||0)*100)}%`;
+      if (eventType === 'request_explanation') return `${kpStr} \u8bf7\u6c42\u8bb2\u89e3(${reasonLabels[d.reasonTag] || d.reasonTag || ''})`;
+      if (eventType === 'explanation_feedback') return `${kpStr} \u8bb2\u89e3\u53cd\u9988\uff1a${feedbackLabels[d.feedback] || d.feedback || ''}`;
+      if (eventType === 'weak_point_changed') return `${kpStr} \u8584\u5f31\u5206 ${d.oldScore}\u2192${d.newScore}\uff08${weakReasonLabels[d.reason] || d.reason || ''}\uff09`;
+      if (eventType === 'ask_doubt') return `${kpStr} \u63d0\u95ee\uff1a${d.topic || ''}`;
+    } catch (e) { /* use raw */ }
+    return typeof data === 'string' ? data : JSON.stringify(data);
+  }
+
   return raw.map((item, index) => ({
-    id: String(pick(item, ['id', 'recordId', 'activityId'], `activity-${index + 1}`)),
-    type: pick(item, ['type', 'activityType', 'recordType'], 'study'),
-    title: pick(item, ['title', 'name', 'activityName'], '\u5b66\u4e60\u8bb0\u5f55'),
-    description: pick(item, ['description', 'content', 'detail'], ''),
+    id: String(pick(item, ['event_id', 'id', 'recordId', 'activityId'], `activity-${index + 1}`)),
+    type: pick(item, ['event_type', 'type', 'activityType', 'recordType'], 'study'),
+    title: eventLabels[item.event_type] || moduleNames[item.module] || pick(item, ['module', 'title', 'name', 'activityName'], '\u5b66\u4e60\u8bb0\u5f55'),
+    description: formatEventDesc(item),
     subject: pick(item, ['subject', 'subjectName', 'courseName'], ''),
     score: pick(item, ['score', 'accuracy', 'result'], null),
-    time: pick(item, ['time', 'createdAt', 'studyTime', 'date'], ''),
+    time: pick(item, ['created_at', 'time', 'createdAt', 'studyTime', 'date'], ''),
   }));
 }
 
@@ -615,19 +645,14 @@ function normalizeReminders(source, fallback) {
 }
 
 function normalizePreferences(source, fallback) {
-  const preferences = pick(source, ['preferences', 'learningPreferences', 'settings'], source);
-  const contentModes = collectionFrom(preferences, ['preferredContentModes']);
+  const preferences = pick(source, ['preferences', 'learningPreferences', 'settings'], {});
   return {
     weeklyGoalMinutes: numberValue(pick(preferences, ['weeklyGoalMinutes', 'weekGoalMinutes'], fallback.weeklyGoalMinutes), fallback.weeklyGoalMinutes),
     preferredStudyTime: pick(preferences, ['preferredStudyTime', 'studyTime', 'preferredTime'], fallback.preferredStudyTime),
     preferredSessionMinutes: numberValue(pick(preferences, ['preferredSessionMinutes', 'sessionMinutes'], fallback.preferredSessionMinutes), fallback.preferredSessionMinutes),
     reminderEnabled: Boolean(pick(preferences, ['reminderEnabled', 'enableReminder'], fallback.reminderEnabled)),
-    difficulty: pick(preferences, ['difficulty', 'difficultyPreference', 'learningPace'], fallback.difficulty),
-    learningStyle: pick(
-      preferences,
-      ['learningStyle', 'preferredLearningStyle', 'preferredExplanationStyle'],
-      contentModes.length ? contentModes.join(' + ') : fallback.learningStyle,
-    ),
+    difficulty: pick(preferences, ['difficulty', 'difficultyPreference'], fallback.difficulty),
+    learningStyle: pick(preferences, ['learningStyle', 'preferredLearningStyle'], fallback.learningStyle),
   };
 }
 
@@ -662,12 +687,16 @@ export async function getLearningProfile(userId) {
 
   if (!userId) return demo;
 
-  const [profileResult, reminderResult] = await Promise.allSettled([
+  const timelineUrl = `http://localhost:8001/api/user-profile/${encodeURIComponent(normalizedUserId)}/timeline?limit=10`;
+  const [profileResult, knowledgeResult, reminderResult, timelineResult] = await Promise.allSettled([
     get(PROFILE_ENDPOINT(normalizedUserId)),
+    get(KNOWLEDGE_STATUS_ENDPOINT(normalizedUserId)),
     get(REVIEW_REMINDERS_ENDPOINT(normalizedUserId)),
+    fetch(timelineUrl).then(r => r.ok ? r.json() : Promise.reject(r.status)),
   ]);
 
   const profileSource = resultPayload(profileResult);
+  const knowledgeSource = resultPayload(knowledgeResult);
   const reminderSource = resultPayload(reminderResult);
   const profileStatus = String(profileSource?.profileStatus || '').toUpperCase();
   const profileReady = ['READY', 'STALE'].includes(profileStatus);
@@ -704,7 +733,9 @@ export async function getLearningProfile(userId) {
     summary,
     stats: normalizeStats(profileSource || {}, summary, fieldFallback(demo.stats)),
     dimensions: deriveDimensionsFromKnowledge(profileSource || {}, knowledgeRaw, fieldFallback(demo.dimensions)),
-    knowledgeTree: normalizeKnowledgeTree(profileSource || {}, fieldFallback(demo.knowledgeTree)),
+    // develop 侧增量：优先使用独立的 knowledge-status 接口结果构建知识树
+    knowledgeTree: normalizeKnowledgeTree(knowledgeSource || profileSource || {}, fieldFallback(demo.knowledgeTree)),
+    // 后端无 /timeline 端点，保留从画像 recentConfusions/recentFocus 派生时间线的实现
     timeline: deriveTimelineFromProfile(profileSource || {}, fieldFallback(demo.timeline)),
     reminders: normalizeReminders(reminderSource || profileSource || {}, fieldFallback(demo.reminders)),
     preferences: normalizePreferences(profileSource || {}, demo.preferences),
@@ -726,6 +757,7 @@ function findKnowledgePoint(source, knowledgePointId) {
   const selfId = pick(source, ['id', 'kpId', 'knowledgePointId', 'pointId', 'knowledgeId'], null);
   if (selfId !== null && String(selfId) === String(knowledgePointId)) return source;
 
+  // 后端 KnowledgeStatusResponse 的知识列表字段是 knowledge，必须包含
   const collection = collectionFrom(source, ['knowledge', 'knowledgeStatus', 'knowledgeStatuses', 'knowledgePoints', 'records', 'list', 'items']);
   return collection.find((item) => String(
     pick(item, ['id', 'kpId', 'knowledgePointId', 'pointId', 'knowledgeId'], '')
@@ -734,6 +766,7 @@ function findKnowledgePoint(source, knowledgePointId) {
 
 function normalizeTrend(source, fallback) {
   const rawTrend = pick(source, ['trend', 'masteryTrend', 'change', 'masteryChange'], fallback.value);
+  // main 侧：后端 KnowledgeContext.trend 是枚举字符串（IMPROVING/STABLE/DECLINING）
   if (typeof rawTrend === 'string') {
     const directionMap = {
       IMPROVING: 'up',
@@ -863,7 +896,7 @@ export async function getKnowledgePointDetail(userId, knowledgePointId) {
 
   const [knowledgeResult, reminderResult] = await Promise.allSettled([
     get(KNOWLEDGE_STATUS_ENDPOINT(normalizedUserId), {
-      kpId: normalizedPointId,
+      kpId: normalizedPointId, // 后端 /knowledge-status 的查询参数名是 kpId
     }),
     get(REVIEW_REMINDERS_ENDPOINT(normalizedUserId), {
       knowledgePointId: normalizedPointId,
@@ -886,7 +919,9 @@ export async function getKnowledgePointDetail(userId, knowledgePointId) {
     return demo;
   }
 
-  const mastery = masteryPercentage(pick(pointSource, ['mastery', 'masteryScore', 'masteryRate', 'score', 'progress'], demo.mastery), demo.mastery);
+  // 后端 masteryScore 为 0~1 小数（DECIMAL(5,4)），0~1 区间需 ×100 归一为百分比
+  const rawMastery = numberValue(pick(pointSource, ['mastery', 'masteryScore', 'masteryRate', 'score', 'progress'], demo.mastery), demo.mastery);
+  const mastery = percentage(rawMastery >= 0 && rawMastery <= 1 ? rawMastery * 100 : rawMastery, demo.mastery);
   const isDemo = !requestSucceeded(knowledgeResult);
   const evidenceCount = numberValue(pick(pointSource, ['evidenceCount'], 0), 0);
   // 字段级回退策略：isDemo（请求失败/未就绪）时才允许 demo 数据；
@@ -931,6 +966,7 @@ function identifier(value, fallback) {
 
 /**
  * 向 M6 写入一条符合 backend-M6 1.0 契约的学习行为。
+ * （develop 侧删除了事件上报实现，但 main 侧页面仍在调用，此处恢复 main 版本）
  */
 export async function saveLearningEvent(userId, event) {
   const numericUserId = Number(userId);

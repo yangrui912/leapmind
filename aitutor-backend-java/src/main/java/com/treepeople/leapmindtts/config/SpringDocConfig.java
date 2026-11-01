@@ -78,6 +78,18 @@ public class SpringDocConfig {
     }
 
     /**
+     * 备课接口 — PPT模板、备课内容管理
+     */
+    @Bean
+    public GroupedOpenApi lessonPrepApi() {
+        return GroupedOpenApi.builder()
+                .group("5-备课接口")
+                .displayName("备课接口")
+                .pathsToMatch("/api/lesson-prep/**")
+                .build();
+    }
+
+    /**
      * 管理后台接口 — 管理员功能
      */
     @Bean
@@ -89,9 +101,36 @@ public class SpringDocConfig {
                 .build();
     }
 
+    /**
+     * 薄弱点分析接口 — 薄弱点查询、AI分析和练习推荐
+     */
+    @Bean
+    public GroupedOpenApi weakPointsApi() {
+        return GroupedOpenApi.builder()
+                .group("5-薄弱点分析")
+                .displayName("薄弱点分析接口")
+                .pathsToMatch("/api/weak-points/**", "/api/exercises/**")
+                .build();
+    }
+
+    /**
+     * M6 用户画像接口
+     */
+    @Bean
+    public GroupedOpenApi eventApi() {
+        return GroupedOpenApi.builder()
+                .group("5-事件采集")
+                .displayName("事件采集接口 (M1/M2/M4/M7)")
+                .pathsToMatch("/api/events/**")
+                .build();
+    }
+
     @Bean
     public GroupedOpenApi m6ProfileApi() {
-        return GroupedOpenApi.builder().group("m6-user-profile").displayName("M6 用户画像")
-                .pathsToMatch("/api/user-profile/**").build();
+        return GroupedOpenApi.builder()
+                .group("m6-user-profile")
+                .displayName("M6 用户画像")
+                .pathsToMatch("/api/user-profile/**")
+                .build();
     }
 }
