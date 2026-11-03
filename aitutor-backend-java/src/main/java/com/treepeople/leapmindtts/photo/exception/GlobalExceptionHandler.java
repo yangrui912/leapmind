@@ -10,12 +10,6 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  */
 @Component("photoGlobalExceptionHandler")
 @RestControllerAdvice
-
-/**
- * 全局异常处理器
- * 统一捕获并处理所有异常
- */
-@RestControllerAdvice
 public class GlobalExceptionHandler {
 
     /**
