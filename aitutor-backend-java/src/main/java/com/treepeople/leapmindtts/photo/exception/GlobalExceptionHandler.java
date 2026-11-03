@@ -1,8 +1,15 @@
 package com.treepeople.leapmindtts.photo.exception;
 
 import com.treepeople.leapmindtts.photo.dto.Result;
+import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+/**
+ * M2 拍照答疑模块的局部异常处理器（bean 命名以区别全局处理器）
+ */
+@Component("photoGlobalExceptionHandler")
+@RestControllerAdvice
 
 /**
  * 全局异常处理器
