@@ -46,6 +46,20 @@ public class PythonAIClient {
     }
 
     /**
+     * 向 Python 内部接口发送任意 JSON 请求体，返回原始 JSON 字符串。
+     * 用于视觉 OCR 这类非标准 AI 调用。
+     */
+    public String callRaw(String url, Object payload) {
+        return webClient.post()
+                .uri(url)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToMono(String.class)
+                .block(java.time.Duration.ofSeconds(150));
+    }
+
+    /**
      * 非流式调用 Python AI 服务
      *
      * @param request AI 调用请求

@@ -26,9 +26,33 @@ public class OcrServiceImpl implements OcrService {
     @Resource
     private OcrConfig ocrConfig;
 
+    @Resource
+    private com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
+
+    @Resource
+    private com.treepeople.leapmindtts.service.explain.PythonAIClient pythonAIClient;
+
+    @org.springframework.beans.factory.annotation.Value("${python.ai.base-url:http://localhost:8001}")
+    private String pythonAiBaseUrl;
+
     @Override
     public OcrResultDTO recognize(MultipartFile file) {
         long start = System.currentTimeMillis();
+
+        // 用户自填了 AI 服务时，优先用其视觉模型识别（无需额外 OCR 凭据）
+        com.treepeople.leapmindtts.pojo.dto.AiOverride override = aiOverrideResolver.current();
+        if (override != null) {
+            OcrResultDTO dto = new OcrResultDTO();
+            dto.setProvider("vision");
+            try {
+                return visionOcr(file, override, dto, start);
+            } catch (BusinessException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new BusinessException(502, "图片识别失败，请检查 AI 服务配置");
+            }
+        }
+
         String provider = ocrConfig.getProvider();
         OcrResultDTO dto = new OcrResultDTO();
         dto.setProvider(provider);
@@ -47,6 +71,35 @@ public class OcrServiceImpl implements OcrService {
         } catch (Exception e) {
             throw new BusinessException(500, "OCR识别异常：" + e.getMessage());
         }
+    }
+
+    /**
+     * 视觉模型识别：把图片交给用户自填的多模态模型，返回题目文字
+     */
+    private OcrResultDTO visionOcr(MultipartFile file,
+                                   com.treepeople.leapmindtts.pojo.dto.AiOverride override,
+                                   OcrResultDTO dto, long start) throws Exception {
+        String contentType = file.getContentType();
+        String mime = (contentType == null || contentType.isBlank()) ? "image/png" : contentType;
+        String imageBase64 = Base64.getEncoder().encodeToString(file.getBytes());
+
+        HashMap<String, Object> payload = new HashMap<>();
+        payload.put("imageBase64", imageBase64);
+        payload.put("mimeType", mime);
+        payload.put("aiOverride", override);
+
+        String url = pythonAiBaseUrl + "/api/internal/ai/ocr/vision";
+        String response = pythonAIClient.callRaw(url, payload);
+
+        JSONObject json = JSONUtil.parseObj(response);
+        String text = json.getStr("text", "");
+        if (text == null || text.isBlank()) {
+            throw new BusinessException(422, "未识别到文字，请上传更清晰的题目图片");
+        }
+        dto.setText(text);
+        dto.setWordsCount(text.replaceAll("\\s+", "").length());
+        dto.setCostTime(System.currentTimeMillis() - start);
+        return dto;
     }
 
     /**
