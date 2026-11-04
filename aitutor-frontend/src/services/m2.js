@@ -91,6 +91,11 @@ export async function photoQA(params, onMessage, onError) {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let sawDone = false
+    const emit = (data) => {
+      if (data?.type === 'done') sawDone = true
+      onMessage?.(data)
+    }
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -98,18 +103,38 @@ export async function photoQA(params, onMessage, onError) {
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            if (data.type === 'error') { onError?.(new Error(data.message)); return }
-            onMessage(data)
-          } catch { /* skip */ }
-        }
+        if (handleSseLine(line, emit, onError) === false) return
       }
     }
+    // 处理流末尾没有换行符的最后一条事件
+    if (buffer && handleSseLine(buffer, emit, onError) === false) return
+    // 兜底：服务端没发 done 就断开时，避免界面一直停留在“思考中”
+    if (!sawDone) emit({ type: 'done' })
   } catch (err) {
     onError?.(err)
   }
+}
+
+/**
+ * 解析单行 SSE（兼容 "data:{...}" 与 "data: {...}" 两种写法）
+ * 返回 false 表示遇到 error 事件，调用方应终止读取
+ */
+function handleSseLine(rawLine, onMessage, onError) {
+  const trimmed = (rawLine || '').trim()
+  if (!trimmed.startsWith('data:')) return true
+  const payload = trimmed.slice(5).trim()
+  if (!payload || payload === '[DONE]') return true
+  try {
+    const data = JSON.parse(payload)
+    if (data.type === 'error') {
+      onError?.(new Error(data.message || data.content || 'AI 生成失败'))
+      return false
+    }
+    onMessage?.(data)
+  } catch {
+    // 非 JSON 片段忽略
+  }
+  return true
 }
 
 /**
@@ -128,6 +153,11 @@ export async function generateExplain(params, onMessage, onError) {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let sawDone = false
+    const emit = (data) => {
+      if (data?.type === 'done') sawDone = true
+      onMessage?.(data)
+    }
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -135,15 +165,11 @@ export async function generateExplain(params, onMessage, onError) {
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6))
-            if (data.type === 'error') { onError?.(new Error(data.message)); return }
-            onMessage(data)
-          } catch { /* skip */ }
-        }
+        if (handleSseLine(line, emit, onError) === false) return
       }
     }
+    if (buffer && handleSseLine(buffer, emit, onError) === false) return
+    if (!sawDone) emit({ type: 'done' })
   } catch (err) {
     onError?.(err)
   }
