@@ -13,6 +13,8 @@ export default function AiSettingsDialog({ open, onClose }) {
   const [model, setModel] = useState('');
   const [sessionOnly, setSessionOnly] = useState(false);
   const [notice, setNotice] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   useEffect(() => {
     if (!open) return;
@@ -38,11 +40,48 @@ export default function AiSettingsDialog({ open, onClose }) {
     }, 600);
   };
 
+  const handleTest = async () => {
+    if (!baseUrl.trim() || !token.trim()) {
+      setTestResult({ ok: false, message: '请先填写服务地址和访问令牌' });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // 用当前输入框的值探测（不依赖是否已保存）
+      const res = await fetch('/api/ai/test', {
+        method: 'POST',
+        headers: {
+          'X-Ai-Base-Url': baseUrl.trim(),
+          'X-Ai-Token': token.trim(),
+          'X-Ai-Model': model.trim(),
+        },
+      });
+      const json = await res.json().catch(() => ({}));
+      const models = json?.data?.models || [];
+      if (res.ok && json?.code === 200) {
+        setTestResult({
+          ok: true,
+          message: models.length
+            ? `连接成功，可用模型 ${models.length} 个：${models.slice(0, 6).join('、')}${models.length > 6 ? ' …' : ''}`
+            : '连接成功（该服务未返回模型列表，可继续直接使用）',
+        });
+      } else {
+        setTestResult({ ok: false, message: json?.message || `连接失败（HTTP ${res.status}）` });
+      }
+    } catch (err) {
+      setTestResult({ ok: false, message: err?.message || '连接失败' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const handleClear = () => {
     clearAiSettings();
     setBaseUrl('');
     setToken('');
     setModel('');
+    setTestResult(null);
     setNotice('已清除本机保存的 AI 配置');
   };
 
@@ -126,14 +165,34 @@ export default function AiSettingsDialog({ open, onClose }) {
           <p className="mt-4 rounded-lg bg-indigo-50 px-3 py-2 text-sm text-indigo-700">{notice}</p>
         )}
 
-        <div className="mt-6 flex items-center justify-between">
-          <button
-            type="button"
-            onClick={handleClear}
-            className="rounded-lg px-3 py-2 text-sm text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+        {testResult && (
+          <p
+            className={`mt-3 rounded-lg px-3 py-2 text-sm ${
+              testResult.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+            }`}
           >
-            清除配置
-          </button>
+            {testResult.message}
+          </p>
+        )}
+
+        <div className="mt-6 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleClear}
+              className="rounded-lg px-3 py-2 text-sm text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+            >
+              清除配置
+            </button>
+            <button
+              type="button"
+              onClick={handleTest}
+              disabled={testing}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {testing ? '测试中…' : '测试连接'}
+            </button>
+          </div>
           <div className="flex gap-2">
             <button
               type="button"
