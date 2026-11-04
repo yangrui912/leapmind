@@ -4,6 +4,7 @@
  */
 
 import { getToken, removeToken } from '../utils/tokenManager';
+import { getAiHeaders } from './aiSettings';
 
 // 获取 API 基础 URL
 // 如果设置了 VITE_API_BASE，使用它；否则使用空字符串（依赖 Vite 代理）
@@ -53,6 +54,8 @@ export async function request(endpoint, options = {}) {
   const headers = {
     'Accept': 'application/json',
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    // 用户自填的 AI 服务配置（未配置时不产生任何请求头）
+    ...getAiHeaders(),
     ...options.headers,
   };
 

@@ -38,6 +38,8 @@ class AIGenerateRequest(BaseModel):
     modelName: Optional[str] = None
     maxTokens: Optional[int] = None
     temperature: Optional[float] = None
+    # 用户自填的 AI 服务配置（baseUrl/apiKey/model），仅本次请求生效，不落库不落日志
+    aiOverride: Optional[dict] = None
 
 
 class AIGenerateStreamEvent(BaseModel):

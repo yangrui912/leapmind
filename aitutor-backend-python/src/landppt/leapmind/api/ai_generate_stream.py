@@ -16,8 +16,9 @@ ai_client = LeapMindAIClient()
 async def generate(request: AIGenerateRequest):
     """Non-streaming AI generation"""
     prompt = _build_prompt(request)
+    client = _client_for(request)
     try:
-        result = await ai_client.generate(prompt, max_tokens=request.maxTokens, temperature=request.temperature)
+        result = await client.generate(prompt, max_tokens=request.maxTokens, temperature=request.temperature)
         return {"content": result}
     except Exception as e:
         logger.error(f"AI generate failed: {e}")
@@ -28,10 +29,11 @@ async def generate(request: AIGenerateRequest):
 async def generate_stream(request: AIGenerateRequest):
     """SSE streaming AI generation"""
     prompt = _build_prompt(request)
+    client = _client_for(request)
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'thinking', 'content': ''}, ensure_ascii=False)}\n\n"
-        async for chunk in ai_client.stream_generate(prompt, max_tokens=request.maxTokens, temperature=request.temperature):
+        async for chunk in client.stream_generate(prompt, max_tokens=request.maxTokens, temperature=request.temperature):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'content': ''}, ensure_ascii=False)}\n\n"
 
@@ -39,6 +41,13 @@ async def generate_stream(request: AIGenerateRequest):
         event_stream(),
         media_type="text/event-stream"
     )
+
+
+def _client_for(request: AIGenerateRequest) -> LeapMindAIClient:
+    """有用户自填配置时创建一次性客户端（仅本次请求），否则复用默认客户端。"""
+    if request.aiOverride:
+        return LeapMindAIClient(override=request.aiOverride)
+    return ai_client
 
 
 def _build_prompt(request: AIGenerateRequest) -> str:

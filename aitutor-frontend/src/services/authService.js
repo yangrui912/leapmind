@@ -43,6 +43,27 @@ export async function login(username, password) {
 }
 
 /**
+ * 演示环境免登录：以服务端预置账号换取 token
+ * 仅在服务端开启演示登录时可用，失败时静默返回 null
+ * @returns {Promise<{token: string, user: Object}|null>}
+ */
+export async function devLogin() {
+  try {
+    const response = await post('/api/auth/dev-login', {});
+    if (response.code === 200 && response.data?.token) {
+      const { token, expiresIn } = response.data;
+      const user = response.data.user ?? response.data.userInfo ?? null;
+      saveToken(token, expiresIn);
+      saveUserInfo(user);
+      return { token, expiresIn, user };
+    }
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
  * 用户注册
  * @param {Object} userData - 用户注册数据
  * @param {string} userData.username - 用户名

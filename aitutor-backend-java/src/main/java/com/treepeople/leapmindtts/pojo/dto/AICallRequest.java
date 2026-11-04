@@ -34,4 +34,7 @@ public class AICallRequest {
 
     /** 温度参数 */
     private Double temperature;
+
+    /** 用户自填的 AI 服务配置（可选，仅本次请求生效，不落库） */
+    private AiOverride aiOverride;
 }

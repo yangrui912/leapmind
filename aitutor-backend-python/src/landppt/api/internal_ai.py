@@ -13,10 +13,38 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..ai.providers import set_ai_override, reset_ai_override
 from ..services.lesson_prep_service import LessonPrepService, PrepContext
 
 router = APIRouter(prefix="/api/internal", tags=["Internal AI API (Java→Python)"])
 logger = logging.getLogger(__name__)
+
+
+def _override_to_provider_config(override) -> Optional[dict]:
+    """把前端提交的 aiOverride 转成 provider 配置键；无有效配置时返回 None。"""
+    if not override or not isinstance(override, dict):
+        return None
+    config = {}
+    base_url = override.get("baseUrl") or override.get("base_url")
+    credential = override.get("apiKey") or override.get("api_key")
+    model = override.get("model")
+    if base_url:
+        config["base_url"] = base_url
+    if credential:
+        config["api_key"] = credential
+    if model:
+        config["model"] = model
+    return config or None
+
+
+async def _stream_with_override(generator, provider_config):
+    """在流式响应期间保持请求级 AI 配置，结束后恢复。"""
+    token = set_ai_override(provider_config)
+    try:
+        async for item in generator:
+            yield item
+    finally:
+        reset_ai_override(token)
 
 
 class AICallRequest(BaseModel):
@@ -28,6 +56,8 @@ class AICallRequest(BaseModel):
     max_tokens: Optional[int] = Field(default=None, description="最大输出 token")
     temperature: Optional[float] = Field(default=None, description="温度参数")
     extra: Optional[dict] = Field(default=None, description="扩展参数")
+    # 用户自填的 AI 服务配置（baseUrl/apiKey/model），仅本次请求生效
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 class LessonPrepInternalRequest(BaseModel):
@@ -71,7 +101,13 @@ async def internal_ai_generate(request: AICallRequest):
             weak_point_ids=extra.get("weak_point_ids", []),
             user_profile_summary=extra.get("user_profile_summary"),
         )
-        result = await _run_lesson_prep(prep_request)
+        provider_config = _override_to_provider_config(request.aiOverride)
+        token = set_ai_override(provider_config) if provider_config else None
+        try:
+            result = await _run_lesson_prep(prep_request)
+        finally:
+            if token is not None:
+                reset_ai_override(token)
         return JSONResponse(content=result)
 
     return JSONResponse(
@@ -102,19 +138,23 @@ async def internal_ai_generate_stream(request: AICallRequest):
             user_profile_summary=extra.get("user_profile_summary"),
         )
         service = LessonPrepService()
+        stream = service.run_stream(
+            user_id=prep_request.user_id,
+            title=prep_request.title,
+            subject=prep_request.subject,
+            grade=prep_request.grade,
+            knowledge_point_ids=prep_request.knowledge_point_ids,
+            teaching_goals=prep_request.teaching_goals,
+            total_hours=prep_request.total_hours,
+            style=prep_request.style,
+            weak_point_ids=prep_request.weak_point_ids,
+            user_profile_summary=prep_request.user_profile_summary,
+        )
+        provider_config = _override_to_provider_config(request.aiOverride)
+        if provider_config:
+            stream = _stream_with_override(stream, provider_config)
         return StreamingResponse(
-            service.run_stream(
-                user_id=prep_request.user_id,
-                title=prep_request.title,
-                subject=prep_request.subject,
-                grade=prep_request.grade,
-                knowledge_point_ids=prep_request.knowledge_point_ids,
-                teaching_goals=prep_request.teaching_goals,
-                total_hours=prep_request.total_hours,
-                style=prep_request.style,
-                weak_point_ids=prep_request.weak_point_ids,
-                user_profile_summary=prep_request.user_profile_summary,
-            ),
+            stream,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

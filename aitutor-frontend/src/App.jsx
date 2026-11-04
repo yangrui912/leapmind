@@ -30,8 +30,10 @@ import LessonPrepCreatePage from './pages/m5/LessonPrepCreatePage';
 import LessonPrepEditPage from './pages/m5/LessonPrepEditPage';
 import PptEditorPage from './pages/m5/PptEditorPage';
 import LessonPrepListPage from './pages/m5/LessonPrepListPage';
-import { hasValidToken } from './utils/tokenManager';
-import { checkAuth } from './services/authService';
+import { hasValidToken, saveToken } from './utils/tokenManager';
+import { checkAuth, devLogin } from './services/authService';
+import AiSettingsDialog from './components/settings/AiSettingsDialog';
+import { hasAiSettings } from './services/aiSettings';
 
 export default function App() {
     const [isChecking, setIsChecking] = useState(true);
@@ -52,13 +54,16 @@ export default function App() {
     const [m3Params, setM3Params] = useState({}); // 传递给 M3 页面的参数
     const [m5Page, setM5Page] = useState(null); // null | 'create' | 'edit' | 'ppt-editor' | 'list'
     const [m5Params, setM5Params] = useState({}); // 传递给 M5 页面的参数
+    const [showAiSettings, setShowAiSettings] = useState(false); // AI 服务配置弹窗
 
     useEffect(() => {
         const checkSession = async () => {
             try {
                 // 先检查本地是否有有效的 token
                 if (!hasValidToken()) {
-                    setIsAuthed(false);
+                    // 演示/联调环境：尝试免登录进入（服务端未开启时返回 null）
+                    const demo = await devLogin();
+                    setIsAuthed(Boolean(demo));
                     setIsChecking(false);
                     return;
                 }
@@ -318,6 +323,22 @@ export default function App() {
                     />
                 )
             )}
+
+            {/* AI 服务配置：用户自填，不内置任何服务地址与访问令牌 */}
+            <button
+                type="button"
+                onClick={() => setShowAiSettings(true)}
+                className="fixed bottom-6 right-6 z-[70] flex items-center gap-2 rounded-full bg-slate-900/85 px-4 py-2.5 text-sm font-medium text-white shadow-lg backdrop-blur transition hover:bg-slate-900"
+                aria-label="AI 服务配置"
+            >
+                <span aria-hidden="true">⚙</span>
+                AI 设置
+                {!hasAiSettings() && (
+                    <span className="ml-1 h-2 w-2 rounded-full bg-amber-400" title="尚未配置 AI 服务" />
+                )}
+            </button>
+
+            <AiSettingsDialog open={showAiSettings} onClose={() => setShowAiSettings(false)} />
         </div>
     );
 }

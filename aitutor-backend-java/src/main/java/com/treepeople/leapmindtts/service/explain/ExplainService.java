@@ -22,6 +22,7 @@ import java.util.UUID;
 public class ExplainService {
 
     private final PythonAIClient pythonAIClient;
+    private final com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
 
     /**
      * 拍照答疑 —— 流式 SSE
@@ -88,6 +89,8 @@ public class ExplainService {
         req.setModule(module);
         req.setScene(scene);
         req.setParams(params);
+        // 用户自填的 AI 服务配置（未配置时为 null，走服务端默认配置）
+        req.setAiOverride(aiOverrideResolver.current());
         return req;
     }
 }

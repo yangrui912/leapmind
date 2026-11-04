@@ -5,12 +5,31 @@ AI provider implementations
 import asyncio
 import json
 import logging
+from contextvars import ContextVar
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 from .base import AIProvider, AIMessage, AIResponse, MessageRole
 from ..core.config import ai_config
 
 logger = logging.getLogger(__name__)
+
+# 请求级 AI 配置覆盖（用户自填 base_url / 访问令牌 / 模型）。
+# 使用 ContextVar 而非全局变量，保证并发请求之间互不串扰，也不落盘。
+_ai_override: ContextVar[Optional[Dict[str, Any]]] = ContextVar("leapmind_ai_override", default=None)
+
+
+def set_ai_override(config: Optional[Dict[str, Any]]):
+    """在请求作用域内设置用户自填配置，返回用于恢复的 token。"""
+    return _ai_override.set(config if config else None)
+
+
+def reset_ai_override(token) -> None:
+    """恢复先前的请求级配置。"""
+    _ai_override.reset(token)
+
+
+def current_ai_override() -> Optional[Dict[str, Any]]:
+    return _ai_override.get()
 
 class OpenAIProvider(AIProvider):
     """OpenAI API provider"""
@@ -447,6 +466,13 @@ class AIProviderManager:
         """Get AI provider instance with caching"""
         if provider_name is None:
             provider_name = ai_config.default_ai_provider
+
+        # 用户自填配置优先：走 OpenAI 兼容协议，且不进入缓存（避免跨请求串用）
+        override = _ai_override.get()
+        if override:
+            merged = dict(ai_config.get_provider_config("openai") or {})
+            merged.update({k: v for k, v in override.items() if v})
+            return AIProviderFactory.create_provider("openai", merged)
 
         # Get current config for the provider
         current_config = ai_config.get_provider_config(provider_name)
