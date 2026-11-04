@@ -49,7 +49,12 @@ public class OcrServiceImpl implements OcrService {
             } catch (BusinessException e) {
                 throw e;
             } catch (Exception e) {
-                throw new BusinessException(502, "图片识别失败，请检查 AI 服务配置");
+                String detail = e.getMessage() == null ? "" : e.getMessage();
+                detail = detail.replaceAll("sk-[A-Za-z0-9_\\-]{8,}", "sk-***");
+                if (detail.length() > 200) {
+                    detail = detail.substring(0, 200);
+                }
+                throw new BusinessException(502, "图片识别失败：" + (detail.isBlank() ? "请检查 AI 服务配置" : detail));
             }
         }
 
@@ -92,6 +97,10 @@ public class OcrServiceImpl implements OcrService {
         String response = pythonAIClient.callRaw(url, payload);
 
         JSONObject json = JSONUtil.parseObj(response);
+        if (!json.getBool("success", false)) {
+            String reason = json.getStr("error", "模型识别失败");
+            throw new BusinessException(502, "图片识别失败：" + reason);
+        }
         String text = json.getStr("text", "");
         if (text == null || text.isBlank()) {
             throw new BusinessException(422, "未识别到文字，请上传更清晰的题目图片");

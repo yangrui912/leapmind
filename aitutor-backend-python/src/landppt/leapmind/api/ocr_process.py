@@ -95,12 +95,35 @@ async def vision_ocr(request: VisionOcrRequest):
         )
         text = (response.choices[0].message.content or "").strip()
     except Exception as e:
-        logger.warning("视觉 OCR 调用失败: %s", type(e).__name__)
-        return JSONResponse(status_code=502, content={"success": False, "error": "模型识别失败，请检查 AI 服务配置"})
+        detail = _safe_error_detail(e)
+        logger.warning("视觉 OCR 调用失败: %s: %s", type(e).__name__, detail)
+        # 统一返回 200 + 业务错误，便于 Java 透出具体原因（不包含任何凭据）
+        return {"success": False, "error": detail, "provider": "vision", "model": model}
 
     # 去掉模型偶尔包裹的代码块
     if text.startswith("```"):
         lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
-    return {"success": bool(text), "text": text, "provider": "vision", "model": model}
+    if not text:
+        return {
+            "success": False,
+            "error": "模型没有返回文字：可能是该模型不支持图片输入，或图片过于模糊",
+            "provider": "vision",
+            "model": model,
+        }
+
+    return {"success": True, "text": text, "provider": "vision", "model": model}
+
+
+def _safe_error_detail(exc: Exception) -> str:
+    """把模型调用异常转成可展示的短消息，去除任何疑似凭据。"""
+    import re
+
+    message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+    message = re.sub(r"sk-[A-Za-z0-9_\-]{8,}", "sk-***", message)
+    message = re.sub(r"Bearer\s+[A-Za-z0-9_\-\.]{8,}", "Bearer ***", message)
+    message = " ".join(message.split())
+    if len(message) > 240:
+        message = message[:240] + "…"
+    return f"{type(exc).__name__}: {message}"

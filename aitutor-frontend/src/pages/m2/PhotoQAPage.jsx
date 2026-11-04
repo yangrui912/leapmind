@@ -47,7 +47,9 @@ export default function PhotoQAPage({ onBack, onExplain }) {
       setMatchResult(matched || { matched: false })
     } catch (err) {
       console.error('OCR 识别失败:', err)
-      setError('OCR 识别失败，请重试')
+      // 透出后端的具体原因，便于定位是配置问题还是图片问题
+      const detail = err?.message && err.message !== 'OCR 识别失败' ? err.message : ''
+      setError(detail ? `OCR 识别失败：${detail}` : 'OCR 识别失败，请重试')
     }
     setLoading(false)
   }
