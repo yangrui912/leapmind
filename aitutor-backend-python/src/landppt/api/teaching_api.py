@@ -38,8 +38,7 @@ async def generate_teaching(request: TeachingGenerateRequest):
     weak_list = profile.get("weakPoints", [])
     weak_points = ", ".join(weak_list) if weak_list else ""
 
-    from ..ai.providers import set_ai_override, reset_ai_override
-    override_token = None
+    from ..ai.providers import set_ai_override
     if request.aiOverride and isinstance(request.aiOverride, dict):
         cfg = {k: v for k, v in {
             "base_url": request.aiOverride.get("baseUrl") or request.aiOverride.get("base_url"),
@@ -47,28 +46,24 @@ async def generate_teaching(request: TeachingGenerateRequest):
             "model": request.aiOverride.get("model"),
         }.items() if v}
         if cfg:
-            override_token = set_ai_override(cfg)
+            set_ai_override(cfg)
 
     service = LectureGenerationService()
     slides = []
-    try:
-        async for event_str in service.run_stream(
-            source_text=request.source_text,
-            course_id=request.course_id,
-            grade=grade,
-            weak_points=weak_points,
-        ):
-            if "data:" in event_str:
-                data_str = event_str.split("data:", 1)[1].strip()
-                try:
-                    data = json.loads(data_str)
-                    if data.get("type") == "slide" and data.get("slide"):
-                        slides.append(data["slide"])
-                except json.JSONDecodeError:
-                    pass
-    finally:
-        if override_token is not None:
-            reset_ai_override(override_token)
+    async for event_str in service.run_stream(
+        source_text=request.source_text,
+        course_id=request.course_id,
+        grade=grade,
+        weak_points=weak_points,
+    ):
+        if "data:" in event_str:
+            data_str = event_str.split("data:", 1)[1].strip()
+            try:
+                data = json.loads(data_str)
+                if data.get("type") == "slide" and data.get("slide"):
+                    slides.append(data["slide"])
+            except json.JSONDecodeError:
+                pass
 
     return JSONResponse(content={
         "success": True,
@@ -87,8 +82,7 @@ async def stream_generate_teaching(request: TeachingGenerateRequest):
     weak_list = profile.get("weakPoints", [])
     weak_points = ", ".join(weak_list) if weak_list else ""
 
-    from ..ai.providers import set_ai_override, reset_ai_override
-    override_token = None
+    from ..ai.providers import set_ai_override
     if request.aiOverride and isinstance(request.aiOverride, dict):
         cfg = {k: v for k, v in {
             "base_url": request.aiOverride.get("baseUrl") or request.aiOverride.get("base_url"),
@@ -96,22 +90,21 @@ async def stream_generate_teaching(request: TeachingGenerateRequest):
             "model": request.aiOverride.get("model"),
         }.items() if v}
         if cfg:
-            override_token = set_ai_override(cfg)
+            # 在当前请求上下文中设置；不使用 token/reset（StreamingResponse 的
+            # generator 运行在子上下文，跨上下文 reset 会抛 ValueError）。
+            # 每个 HTTP 请求拥有独立的 context 副本，请求结束即随之消亡。
+            set_ai_override(cfg)
 
     service = LectureGenerationService()
 
     async def stream():
-        try:
-            async for event_str in service.run_stream(
-                source_text=request.source_text,
-                course_id=request.course_id,
-                grade=grade,
-                weak_points=weak_points,
-            ):
-                yield event_str
-        finally:
-            if override_token is not None:
-                reset_ai_override(override_token)
+        async for event_str in service.run_stream(
+            source_text=request.source_text,
+            course_id=request.course_id,
+            grade=grade,
+            weak_points=weak_points,
+        ):
+            yield event_str
 
     return StreamingResponse(
         stream(),

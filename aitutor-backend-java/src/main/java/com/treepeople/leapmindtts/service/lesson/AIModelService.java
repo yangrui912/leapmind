@@ -218,10 +218,19 @@ public class AIModelService {
                     response.bodyToMono(String.class).flatMap(errBody -> {
                         String safe = errBody == null ? "" : errBody.replaceAll("sk-[A-Za-z0-9_\\-]{8,}", "sk-***");
                         if (safe.length() > 300) safe = safe.substring(0, 300);
-                        return Mono.error(new RuntimeException("AI 服务错误 (HTTP " + response.statusCode() + "): " + safe));
+                        return Mono.error(new org.springframework.web.reactive.function.client.WebClientResponseException(
+                                response.statusCode().value(), "AI 服务错误", null, errBody == null ? new byte[0] : errBody.getBytes(), null));
                     })
                 )
                 .bodyToFlux(String.class)
+                // 建连阶段的 429/5xx 自动退避重试（此时还未输出任何内容，重试无重复风险）；
+                // 流已经开始后的错误不重试，避免内容重复推送
+                .retryWhen(reactor.util.retry.Retry.backoff(3, Duration.ofSeconds(20))
+                        .maxBackoff(Duration.ofSeconds(90))
+                        .filter(err -> err instanceof org.springframework.web.reactive.function.client.WebClientResponseException webErr
+                                && (webErr.getStatusCode().value() == 429 || webErr.getStatusCode().value() >= 500))
+                        .doBeforeRetry(sig -> log.warn("用户自填 AI 触发限流/服务波动，第 {} 次重试",
+                                sig.totalRetries() + 1)))
                 .flatMap((String event) -> {
                     if (event == null || event.trim().isEmpty()) {
                         return Flux.empty();

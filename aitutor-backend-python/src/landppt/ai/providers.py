@@ -33,7 +33,12 @@ def current_ai_override() -> Optional[Dict[str, Any]]:
 
 class OpenAIProvider(AIProvider):
     """OpenAI API provider"""
-    
+
+    # 限流/网关抖动自动重试：免费网关的 TPM/RPM 限制很低，
+    # 连续生成多页课件时必然触发 429，这里按退避策略自动等待重试。
+    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    MAX_RETRIES = 6
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         try:
@@ -45,6 +50,64 @@ class OpenAIProvider(AIProvider):
         except ImportError:
             logger.warning("OpenAI library not installed. Install with: pip install openai")
             self.client = None
+
+    @staticmethod
+    def _status_of(exc: Exception) -> Optional[int]:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        try:
+            return int(status) if status is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _retry_delay(cls, exc: Exception, attempt: int) -> float:
+        """优先遵循 Retry-After 响应头，否则按 20s 起步线性退避。"""
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            retry_after = headers.get("retry-after")
+            if retry_after:
+                try:
+                    return min(float(retry_after), 120.0)
+                except (TypeError, ValueError):
+                    pass
+        return min(20.0 + 15.0 * attempt, 90.0)
+
+    async def _create_with_retry(self, api_params: Dict[str, Any]):
+        """带 429/5xx 自动重试的补全调用（覆盖限流窗口，最多约 4 分钟）。"""
+        import asyncio
+        import openai
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                return await self.client.chat.completions.create(**api_params)
+            except openai.RateLimitError as e:
+                last_exc = e
+                status = self._status_of(e)
+                if attempt >= self.MAX_RETRIES or (status not in self.RETRYABLE_STATUS):
+                    raise
+                delay = self._retry_delay(e, attempt)
+                logger.warning(
+                    "AI 调用触发限流(429)，%.0fs 后进行第 %d/%d 次重试",
+                    delay, attempt + 1, self.MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+            except openai.APIStatusError as e:
+                last_exc = e
+                status = self._status_of(e)
+                if attempt >= self.MAX_RETRIES or (status not in self.RETRYABLE_STATUS):
+                    raise
+                delay = self._retry_delay(e, attempt)
+                logger.warning(
+                    "AI 调用服务波动(%s)，%.0fs 后进行第 %d/%d 次重试",
+                    status, delay, attempt + 1, self.MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # pragma: no cover
     
     async def chat_completion(self, messages: List[AIMessage], **kwargs) -> AIResponse:
         """Generate chat completion using OpenAI"""
@@ -71,8 +134,8 @@ class OpenAIProvider(AIProvider):
             api_params["response_format"] = {"type": "json_object"}
 
         try:
-            response = await self.client.chat.completions.create(**api_params)
-            
+            response = await self._create_with_retry(api_params)
+
             choice = response.choices[0]
             
             return AIResponse(
@@ -131,7 +194,8 @@ class OpenAIProvider(AIProvider):
             api_params["response_format"] = {"type": "json_object"}
 
         try:
-            stream = await self.client.chat.completions.create(**api_params)
+            # 流式同样先过重试（429 在建连阶段抛出，重试不会造成内容重复）
+            stream = await self._create_with_retry(api_params)
 
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:

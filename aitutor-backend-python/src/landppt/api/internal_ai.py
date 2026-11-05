@@ -38,13 +38,18 @@ def _override_to_provider_config(override) -> Optional[dict]:
 
 
 async def _stream_with_override(generator, provider_config):
-    """在流式响应期间保持请求级 AI 配置，结束后恢复。"""
-    token = set_ai_override(provider_config)
+    """在流式响应期间保持请求级 AI 配置。
+
+    注意：不用 token/reset 模式——StreamingResponse 的 generator 可能运行在
+    与 handler 不同的上下文，跨上下文 reset 会抛 ValueError。每个 HTTP 请求
+    拥有独立的 context 副本，请求结束即消亡；这里只需在流结束后清空当前副本。
+    """
+    set_ai_override(provider_config)
     try:
         async for item in generator:
             yield item
     finally:
-        reset_ai_override(token)
+        set_ai_override(None)
 
 
 class AICallRequest(BaseModel):
@@ -109,6 +114,7 @@ async def internal_ai_generate(request: AICallRequest):
             result = await _run_lesson_prep(prep_request)
         finally:
             if token is not None:
+                # handler 内 await（同一上下文），token reset 安全
                 reset_ai_override(token)
         return JSONResponse(content=result)
 
