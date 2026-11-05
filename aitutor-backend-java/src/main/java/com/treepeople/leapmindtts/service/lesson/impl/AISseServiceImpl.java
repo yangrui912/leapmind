@@ -21,11 +21,14 @@ public class AISseServiceImpl implements AISseService {
 
     private final WebClient webClient;
     private final com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     public AISseServiceImpl(WebClient webClient,
-                            com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver) {
+                            com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver,
+                            com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
         this.webClient = webClient;
         this.aiOverrideResolver = aiOverrideResolver;
+        this.objectMapper = objectMapper;
     }
 
     @Value("${ai.teaching.service-url:http://localhost:8000}")
@@ -79,8 +82,18 @@ public class AISseServiceImpl implements AISseService {
                 .retrieve()
                 .bodyToFlux(ServerSentEvent.class)
                 .map(event -> {
+                    // Python 的 JSON 行被 WebClient 反序列化成了 Map；
+                    // String.valueOf(map) 会输出 "{type=outline,...}" 这种 Java 格式，
+                    // 前端 JSON.parse 全部失败。必须重新序列化为标准 JSON。
                     Object data = event.data();
-                    return data != null ? String.valueOf(data) : "";
+                    if (data == null) return "";
+                    if (data instanceof String s && !s.isEmpty()) return s;
+                    try {
+                        return objectMapper.writeValueAsString(data);
+                    } catch (Exception e) {
+                        log.warn("SSE data 序列化失败: {}", e.getMessage());
+                        return "";
+                    }
                 })
                 .filter(s -> !s.isEmpty())
                 .doOnNext(chunk -> log.debug("SSE chunk received: {} chars", chunk.length()))
