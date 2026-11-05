@@ -52,17 +52,18 @@ def _client_for(request: AIGenerateRequest) -> LeapMindAIClient:
 
 def _build_prompt(request: AIGenerateRequest) -> str:
     params = request.params or {}
-    user_profile = params.get("userProfile")
+    # Java 端可能显式传 null（key 存在但值为 null），get 的默认值不会生效，这里统一兜底
+    user_profile = params.get("userProfile") or None
 
     if request.module == "explain":
         if request.scene == "photo_qa":
-            question = params.get("question", {})
+            question = params.get("question") or {}
             return prompt_manager.build_photo_qa_prompt(question, user_profile)
         elif request.scene == "explain_wrong":
-            question = params.get("question", {})
-            user_answer = params.get("userAnswer", {})
-            wrong_reason_tag = params.get("wrongReasonTag", "")
-            knowledge_points = params.get("knowledgePoints", [])
+            question = params.get("question") or {}
+            user_answer = params.get("userAnswer") or {}
+            wrong_reason_tag = params.get("wrongReasonTag") or ""
+            knowledge_points = params.get("knowledgePoints") or []
             return prompt_manager.build_explain_wrong_prompt(
                 question, user_answer, wrong_reason_tag, knowledge_points, user_profile
             )
@@ -73,13 +74,13 @@ def _build_prompt(request: AIGenerateRequest) -> str:
 
 
 def _build_lesson_prep_prompt(params: dict) -> str:
-    title = params.get("title", "未命名")
-    subject = params.get("subject", "未知")
-    grade = params.get("grade", "未知年级")
-    knowledge_points = params.get("knowledgePointIds", [])
-    teaching_goals = params.get("teachingGoals", [])
-    total_hours = params.get("totalHours", 1)
-    style = params.get("style", "standard")
+    title = params.get("title") or "未命名"
+    subject = params.get("subject") or "未知"
+    grade = params.get("grade") or "未知年级"
+    knowledge_points = params.get("knowledgePointIds") or []
+    teaching_goals = params.get("teachingGoals") or []
+    total_hours = params.get("totalHours") or 1
+    style = params.get("style") or "standard"
 
     prompt = f"""你是一位经验丰富的教师，请根据以下信息生成结构化备课内容。
 

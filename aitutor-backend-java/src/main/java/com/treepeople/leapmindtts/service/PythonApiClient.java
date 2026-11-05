@@ -52,6 +52,8 @@ public class PythonApiClient {
      */
     private final WebClient streamingWebClient;
 
+    private final com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
+
     @Value("${python.service.base-url:http://localhost:8001}")
     private String pythonBaseUrl;
 
@@ -64,6 +66,7 @@ public class PythonApiClient {
     public LessonPrepResponse generateLessonPrep(LessonPrepRequest request) {
         log.info("[联桥] 调用 Python 备课生成, title={}, subject={}, grade={}",
                 request.getTitle(), request.getSubject(), request.getGrade());
+        request.setAiOverride(aiOverrideResolver.current());
 
         WebClient client = webClientBuilder
                 .baseUrl(pythonBaseUrl)
@@ -149,6 +152,7 @@ public class PythonApiClient {
      */
     public StreamedLessonPrepResult streamLessonPrep(LessonPrepRequest request, SseEmitter emitter) {
         log.info("[联桥-SSE] 开始流式备课 title={}, subject={}", request.getTitle(), request.getSubject());
+        request.setAiOverride(aiOverrideResolver.current());
 
         // 1. 组装 Python internal_ai.py 期望的 AICallRequest 包装体
         Map<String, Object> extra = buildExtraSnakeMap(request);
@@ -159,6 +163,9 @@ public class PythonApiClient {
         aiCall.put("max_tokens", null);
         aiCall.put("temperature", null);
         aiCall.put("extra", extra);
+        if (request.getAiOverride() != null) {
+            aiCall.put("aiOverride", request.getAiOverride());
+        }
 
         StreamAccumulator acc = new StreamAccumulator();
 
@@ -489,6 +496,10 @@ public class PythonApiClient {
 
         @JsonProperty("user_profile_summary")
         private String userProfileSummary;
+
+        /** 用户自填的 AI 服务配置（服务端在发请求前填充，不落库） */
+        @JsonProperty("aiOverride")
+        private com.treepeople.leapmindtts.pojo.dto.AiOverride aiOverride;
     }
 
     /**

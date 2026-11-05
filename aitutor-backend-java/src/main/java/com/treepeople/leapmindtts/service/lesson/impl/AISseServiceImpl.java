@@ -1,7 +1,6 @@
 package com.treepeople.leapmindtts.service.lesson.impl;
 
 import com.treepeople.leapmindtts.service.lesson.AISseService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -18,21 +17,36 @@ import java.util.Map;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AISseServiceImpl implements AISseService {
 
     private final WebClient webClient;
+    private final com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
+
+    public AISseServiceImpl(WebClient webClient,
+                            com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver) {
+        this.webClient = webClient;
+        this.aiOverrideResolver = aiOverrideResolver;
+    }
 
     @Value("${ai.teaching.service-url:http://localhost:8000}")
     private String aiTeachingServiceUrl;
 
+    /** 组装带用户自填 AI 配置的请求体（未配置时不包含该字段） */
+    private Map<String, Object> buildBody(String courseId, String sourceText, Map<String, Object> userProfile) {
+        Map<String, Object> body = new java.util.HashMap<>();
+        body.put("course_id", courseId);
+        body.put("source_text", sourceText != null ? sourceText : "");
+        body.put("user_profile", userProfile != null ? userProfile : Map.of());
+        var override = aiOverrideResolver.current();
+        if (override != null) {
+            body.put("aiOverride", override);
+        }
+        return body;
+    }
+
     @Override
     public String generateTeachingContent(String courseId, String sourceText, Map<String, Object> userProfile) {
-        Map<String, Object> requestBody = Map.of(
-                "course_id", courseId,
-                "source_text", sourceText != null ? sourceText : "",
-                "user_profile", userProfile != null ? userProfile : Map.of()
-        );
+        Map<String, Object> requestBody = buildBody(courseId, sourceText, userProfile);
 
         try {
             String result = webClient.post()
@@ -55,11 +69,7 @@ public class AISseServiceImpl implements AISseService {
     @Override
     public Flux<String> streamGenerateTeachingContent(String courseId, String sourceText,
                                                       Map<String, Object> userProfile) {
-        Map<String, Object> requestBody = Map.of(
-                "course_id", courseId,
-                "source_text", sourceText != null ? sourceText : "",
-                "user_profile", userProfile != null ? userProfile : Map.of()
-        );
+        Map<String, Object> requestBody = buildBody(courseId, sourceText, userProfile);
 
         return webClient.post()
                 .uri(aiTeachingServiceUrl + "/api/ai/stream-generate-teaching")

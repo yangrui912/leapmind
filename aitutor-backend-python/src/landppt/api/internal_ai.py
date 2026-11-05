@@ -76,6 +76,8 @@ class LessonPrepInternalRequest(BaseModel):
         default=None,
         description="用户画像摘要（Java 从 M6 获取后传入）"
     )
+    # 用户自填的 AI 服务配置（baseUrl/apiKey/model），仅本次请求生效
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 @router.post("/ai/generate")
@@ -175,7 +177,13 @@ async def internal_ai_generate_stream(request: AICallRequest):
 @router.post("/ai/generate-lesson-prep")
 async def internal_generate_lesson_prep(request: LessonPrepInternalRequest):
     """非流式备课生成 —— Java 调用此接口获取完整备课结果。"""
-    result = await _run_lesson_prep(request)
+    provider_config = _override_to_provider_config(request.aiOverride)
+    token = set_ai_override(provider_config) if provider_config else None
+    try:
+        result = await _run_lesson_prep(request)
+    finally:
+        if token is not None:
+            reset_ai_override(token)
     return JSONResponse(content=result)
 
 

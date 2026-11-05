@@ -44,11 +44,14 @@ public class AIModelService {
     private final WebClient webClient;
     private final TextPolishingProperties textPolishingProperties;
     private final ObjectMapper objectMapper;
+    private final com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver;
 
-    public AIModelService(WebClient.Builder webClientBuilder, TextPolishingProperties textPolishingProperties, ObjectMapper objectMapper) {
+    public AIModelService(WebClient.Builder webClientBuilder, TextPolishingProperties textPolishingProperties, ObjectMapper objectMapper,
+                          com.treepeople.leapmindtts.service.ai.AiOverrideResolver aiOverrideResolver) {
         this.webClient = webClientBuilder.build();
         this.textPolishingProperties = textPolishingProperties;
         this.objectMapper = objectMapper;
+        this.aiOverrideResolver = aiOverrideResolver;
     }
 
     public Mono<String> getAIResponse(String userInput) {
@@ -176,9 +179,94 @@ public class AIModelService {
 
     /**
      * 流式 AI 响应
-     * 调用阿里云 DashScope 流式 API，返回增量文本块及 token 用量
+     * 用户在 AI 设置里填了自有服务时走 OpenAI 兼容协议；
+     * 否则调用阿里云 DashScope 流式 API，返回增量文本块及 token 用量
      */
     public Flux<AiChunk> streamAIResponse(List<Map<String, String>> messages, InputType inputType, List<String> attachmentUrls) {
+        com.treepeople.leapmindtts.pojo.dto.AiOverride override = aiOverrideResolver.current();
+        if (override != null) {
+            return streamViaOpenAICompatible(messages, override);
+        }
+        return streamViaDashScope(messages, inputType, attachmentUrls);
+    }
+
+    /**
+     * 用户自填服务：OpenAI 兼容 /chat/completions 流式调用
+     */
+    private Flux<AiChunk> streamViaOpenAICompatible(List<Map<String, String>> messages,
+                                                    com.treepeople.leapmindtts.pojo.dto.AiOverride override) {
+        String baseUrl = override.getBaseUrl();
+        while (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+        String model = (override.getModel() == null || override.getModel().isBlank())
+                ? "gpt-3.5-turbo" : override.getModel();
+
+        var body = Map.of(
+                "model", model,
+                "messages", messages,
+                "stream", true,
+                "stream_options", Map.of("include_usage", true));
+
+        return webClient.post()
+                .uri(baseUrl + "/chat/completions")
+                .header("Authorization", "Bearer " + override.getApiKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .retrieve()
+                .onStatus(status -> !status.is2xxSuccessful(), response ->
+                    response.bodyToMono(String.class).flatMap(errBody -> {
+                        String safe = errBody == null ? "" : errBody.replaceAll("sk-[A-Za-z0-9_\\-]{8,}", "sk-***");
+                        if (safe.length() > 300) safe = safe.substring(0, 300);
+                        return Mono.error(new RuntimeException("AI 服务错误 (HTTP " + response.statusCode() + "): " + safe));
+                    })
+                )
+                .bodyToFlux(String.class)
+                .flatMap((String event) -> {
+                    if (event == null || event.trim().isEmpty()) {
+                        return Flux.empty();
+                    }
+                    List<AiChunk> chunks = new ArrayList<>();
+                    for (String line : event.split("\n")) {
+                        String trimmed = line.trim();
+                        if (trimmed.isEmpty() || !trimmed.startsWith("data:")) continue;
+                        String payload = trimmed.substring(5).trim();
+                        if (payload.isEmpty()) continue;
+                        if ("[DONE]".equals(payload)) {
+                            chunks.add(new AiChunk("", true, null, null));
+                            continue;
+                        }
+                        try {
+                            var json = objectMapper.readTree(payload);
+                            var choices = json.path("choices");
+                            String text = "";
+                            if (choices.isArray() && choices.size() > 0) {
+                                text = choices.get(0).path("delta").path("content").asText("");
+                            }
+                            Integer inTokens = null, outTokens = null;
+                            var usage = json.path("usage");
+                            if (!usage.isMissingNode() && !usage.isNull()) {
+                                if (usage.path("prompt_tokens").isInt()) inTokens = usage.path("prompt_tokens").asInt();
+                                if (usage.path("completion_tokens").isInt()) outTokens = usage.path("completion_tokens").asInt();
+                            }
+                            if (!text.isEmpty()) {
+                                chunks.add(new AiChunk(text, false, inTokens, outTokens));
+                            } else if (inTokens != null) {
+                                chunks.add(new AiChunk("", true, inTokens, outTokens));
+                            }
+                        } catch (Exception e) {
+                            log.warn("解析 OpenAI 兼容流式响应行失败: {}", e.getMessage());
+                        }
+                    }
+                    return Flux.fromIterable(chunks);
+                })
+                .doOnError(err -> log.error("用户自填 AI 流式调用失败: {}", err.getMessage()));
+    }
+
+    /**
+     * DashScope 流式调用（服务端配置了 ai.api.key 时使用）
+     */
+    private Flux<AiChunk> streamViaDashScope(List<Map<String, String>> messages, InputType inputType, List<String> attachmentUrls) {
         if (messages == null || messages.isEmpty()) {
             log.warn("消息列表为空，返回空流");
             return Flux.empty();
