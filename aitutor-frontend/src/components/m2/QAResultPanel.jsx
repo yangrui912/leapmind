@@ -74,7 +74,10 @@ export default function QAResultPanel({ ocrRecordId, question, onKnowledgePointC
             // plain text fallback
           }
         } else {
-          setContent(prev => prev + chunk.content + '\n\n')
+          // start/thinking 等控制事件没有 content，跳过避免渲染 "undefined"
+          if (chunk.content) {
+            setContent(prev => prev + chunk.content + '\n\n')
+          }
         }
       },
       (err) => {
