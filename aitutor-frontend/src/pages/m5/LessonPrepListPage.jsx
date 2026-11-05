@@ -36,7 +36,13 @@ export default function LessonPrepListPage({ onBack, onCreate, onEdit, onPreview
     setLoading(true)
     try {
       const data = await getLessonPrepContents(uid)
-      setItems(data || [])
+      // 后端返回分页对象 {total, items}，旧版返回数组——两者兼容
+      const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+          ? data.items
+          : []
+      setItems(list)
     } catch (e) {
       console.error('加载备课列表失败:', e)
     }
