@@ -53,7 +53,12 @@ async def vision_ocr(request: VisionOcrRequest):
 
     base_url = override.get("baseUrl") or override.get("base_url")
     credential = override.get("apiKey") or override.get("api_key")
-    model = override.get("model")
+    # 视觉模型优先：用户可为拍照搜题单独指定支持看图的模型
+    model = (
+        override.get("visionModel")
+        or override.get("vision_model")
+        or override.get("model")
+    )
     if not base_url or not credential:
         return JSONResponse(status_code=400, content={"success": False, "error": "AI 服务配置不完整"})
 
@@ -81,18 +86,35 @@ async def vision_ocr(request: VisionOcrRequest):
     client = AsyncOpenAI(api_key=credential, base_url=base_url, timeout=120.0)
     data_url = f"data:{mime};base64,{request.imageBase64}"
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": VISION_OCR_PROMPT},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }],
-            temperature=0.1,
-            max_tokens=2048,
-        )
+        # 某些模型（如 kimi-k3）不支持自定义 temperature，遇到 400 时去掉该参数重试
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": VISION_OCR_PROMPT},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                }],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+        except Exception as e:
+            if "temperature" in str(e) and "not supported" in str(e):
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_OCR_PROMPT},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }],
+                    max_tokens=2048,
+                )
+            else:
+                raise
         text = (response.choices[0].message.content or "").strip()
     except Exception as e:
         detail = _safe_error_detail(e)

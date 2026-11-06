@@ -18,4 +18,7 @@ public class AiOverride {
 
     /** 模型标识 */
     private String model;
+
+    /** 视觉模型（拍照搜题的图片识别用，可选；未填时回退到 model） */
+    private String visionModel;
 }

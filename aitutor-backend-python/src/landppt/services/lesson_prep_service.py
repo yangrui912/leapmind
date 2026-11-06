@@ -436,6 +436,50 @@ class LessonPrepService:
             }]
 
         slides_batch = parsed if isinstance(parsed, list) else [parsed]
+
+        # 推理模型（deepseek 思考档）输出 token 大量消耗在 reasoning 上，
+        # 可能只吐出封面页。若一个课时只得到 1 张封面、没有任何内容页，
+        # 追加一次强约束重试（明确要求 3-8 页、禁止只输出封面）。
+        has_content_slide = any(
+            s.get("type") in ("content", "interactive", "summary", "homework")
+            for s in slides_batch
+            if isinstance(s, dict) and not s.get("is_fallback")
+        )
+        if len(slides_batch) < 2 or not has_content_slide:
+            try:
+                logger.warning(
+                    "Stage2 课时「%s」仅生成 %d 页（缺内容页），追加强约束重试",
+                    section.get("title", ""), len(slides_batch),
+                )
+                retry_messages = messages[:-1] + [AIMessage(
+                    role=MessageRole.USER,
+                    content=(
+                        "你刚才只输出了封面页，页数不足。请重新输出完整的幻灯片 JSON 数组："
+                        "必须包含 3-8 张幻灯片——1 张封面 + 至少 2 张内容页 + 互动/总结/作业页。"
+                        "每张幻灯片都要有 title 和 bullet_points（5-7 个信息点）。"
+                        "只输出 JSON 数组，不要输出任何其他内容。"
+                    ),
+                )]
+                retry_response = await self.provider.chat_completion(
+                    retry_messages,
+                    json_mode=True,
+                    temperature=ai_config.stage2_temperature,
+                )
+                retry_parsed = JSONExtractor.extract(retry_response.content, fallback=[])
+                if isinstance(retry_parsed, dict):
+                    for key in ("slides", "pages", "data", "items"):
+                        if isinstance(retry_parsed.get(key), list):
+                            retry_parsed = retry_parsed[key]
+                            break
+                if isinstance(retry_parsed, list) and len(retry_parsed) > len(slides_batch):
+                    slides_batch = retry_parsed
+                    logger.warning(
+                        "Stage2 重试成功：课时「%s」现生成 %d 页",
+                        section.get("title", ""), len(slides_batch),
+                    )
+            except Exception as retry_error:
+                logger.warning("Stage2 追加重试失败（保留原结果）: %s", retry_error)
+
         validated: list[dict] = []
         for slide in slides_batch:
             if not isinstance(slide, dict) or "title" not in slide:

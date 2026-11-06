@@ -31,6 +31,7 @@ public class AiOverrideResolver {
     private static final String ADDRESS_HEADER = HEADER_PREFIX + "Base-Url";
     private static final String CREDENTIAL_HEADER = HEADER_PREFIX + "Token";
     private static final String MODEL_HEADER = HEADER_PREFIX + "Model";
+    private static final String VISION_MODEL_HEADER = HEADER_PREFIX + "Vision-Model";
 
     private final boolean userConfigEnabled;
     private final List<String> allowedHosts;
@@ -57,12 +58,14 @@ public class AiOverrideResolver {
         String rawAddress = request.getHeader(ADDRESS_HEADER);
         String rawCredential = request.getHeader(CREDENTIAL_HEADER);
         String rawModel = request.getHeader(MODEL_HEADER);
+        String rawVisionModel = request.getHeader(VISION_MODEL_HEADER);
 
         String address = trimToNull(rawAddress);
         String credential = trimToNull(rawCredential);
         String model = trimToNull(rawModel);
+        String visionModel = trimToNull(rawVisionModel);
 
-        if (address == null && credential == null && model == null) {
+        if (address == null && credential == null && model == null && visionModel == null) {
             return null;
         }
         if (address == null || credential == null) {
@@ -73,6 +76,7 @@ public class AiOverrideResolver {
         override.setBaseUrl(UrlSafetyValidator.requirePublicHttpUrl(address, allowedHosts));
         override.setApiKey(credential);
         override.setModel(model);
+        override.setVisionModel(visionModel);
         log.debug("已启用用户自填 AI 配置");
         return override;
     }

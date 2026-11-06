@@ -11,6 +11,7 @@ export default function AiSettingsDialog({ open, onClose }) {
   const [baseUrl, setBaseUrl] = useState('');
   const [token, setToken] = useState('');
   const [model, setModel] = useState('');
+  const [visionModel, setVisionModel] = useState('');
   const [sessionOnly, setSessionOnly] = useState(false);
   const [notice, setNotice] = useState('');
   const [testing, setTesting] = useState(false);
@@ -22,6 +23,7 @@ export default function AiSettingsDialog({ open, onClose }) {
     setBaseUrl(current?.baseUrl || '');
     setToken(current?.token || '');
     setModel(current?.model || '');
+    setVisionModel(current?.visionModel || '');
     setSessionOnly(Boolean(current?.sessionOnly));
     setNotice('');
   }, [open]);
@@ -33,7 +35,7 @@ export default function AiSettingsDialog({ open, onClose }) {
       setNotice('请填写服务地址和访问令牌');
       return;
     }
-    saveAiSettings({ baseUrl, token, model }, { sessionOnly });
+    saveAiSettings({ baseUrl, token, model, visionModel }, { sessionOnly });
     setNotice('已保存，本次配置只在本机生效');
     setTimeout(() => {
       onClose?.();
@@ -81,6 +83,7 @@ export default function AiSettingsDialog({ open, onClose }) {
     setBaseUrl('');
     setToken('');
     setModel('');
+    setVisionModel('');
     setTestResult(null);
     setNotice('已清除本机保存的 AI 配置');
   };
@@ -148,6 +151,24 @@ export default function AiSettingsDialog({ open, onClose }) {
               spellCheck={false}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-sm font-medium text-slate-700">
+              视觉模型（可选，拍照搜题识别图片用）
+            </span>
+            <input
+              type="text"
+              value={visionModel}
+              onChange={(e) => setVisionModel(e.target.value)}
+              placeholder="例如 qwen-vl-plus、gpt-4o（需支持看图）"
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+            />
+            <span className="mt-1 block text-xs text-slate-400">
+              不填则用上面的主模型。注意：纯文本模型（deepseek 系等）无法识别图片
+            </span>
           </label>
 
           <label className="flex items-center gap-2 text-sm text-slate-600">

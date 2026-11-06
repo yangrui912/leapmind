@@ -13,6 +13,7 @@ const SESSION_KEY = 'leapmind_ai_config_session';
 const HEADER_BASE_URL = 'X-Ai-Base-Url';
 const HEADER_TOKEN = 'X-Ai-Token';
 const HEADER_MODEL = 'X-Ai-Model';
+const HEADER_VISION_MODEL = 'X-Ai-Vision-Model';
 
 function safeParse(raw) {
   if (!raw) return null;
@@ -27,7 +28,7 @@ function safeParse(raw) {
 
 /**
  * 读取当前生效的 AI 配置（会话级优先于持久化级别）
- * @returns {{baseUrl?: string, token?: string, model?: string, sessionOnly?: boolean}|null}
+ * @returns {{baseUrl?: string, token?: string, model?: string, visionModel?: string, sessionOnly?: boolean}|null}
  */
 export function loadAiSettings() {
   try {
@@ -42,7 +43,7 @@ export function loadAiSettings() {
 
 /**
  * 保存 AI 配置
- * @param {{baseUrl: string, token: string, model?: string}} config
+ * @param {{baseUrl: string, token: string, model?: string, visionModel?: string}} config
  * @param {{sessionOnly?: boolean}} options 仅本次会话时写入 sessionStorage
  */
 export function saveAiSettings(config, options = {}) {
@@ -50,6 +51,7 @@ export function saveAiSettings(config, options = {}) {
     baseUrl: (config.baseUrl || '').trim(),
     token: (config.token || '').trim(),
     model: (config.model || '').trim(),
+    visionModel: (config.visionModel || '').trim(),
   };
   clearAiSettings();
   if (options.sessionOnly) {
@@ -78,6 +80,7 @@ export function hasAiSettings() {
 
 /**
  * 生成 AI 相关请求头；未配置时返回空对象
+ * visionModel 单独透传（拍照搜题的图片识别用），未填时由后端回退到主模型
  */
 export function getAiHeaders() {
   const config = loadAiSettings();
@@ -88,6 +91,9 @@ export function getAiHeaders() {
   };
   if (config.model) {
     headers[HEADER_MODEL] = config.model;
+  }
+  if (config.visionModel) {
+    headers[HEADER_VISION_MODEL] = config.visionModel;
   }
   return headers;
 }
