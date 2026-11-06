@@ -83,6 +83,7 @@ function parsePptStructure(pptStructure) {
     return [];
   }
 }
+export { parsePptStructure };
 
 // ─── 0. 薄弱知识点查询（M3 曾俊桥 / develop 分支，始终走真实） ──
 

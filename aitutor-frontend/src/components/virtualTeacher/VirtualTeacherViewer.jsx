@@ -13,6 +13,14 @@ export default function VirtualTeacherViewer({
   const viewerRef = useRef(externalViewer || new Viewer());
   const [status, setStatus] = useState('loading');
 
+  // 回调只存 ref：父组件重渲染（如播放状态变化）不应触发 viewer 重建
+  const onReadyRef = useRef(onReady);
+  const onErrorRef = useRef(onError);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+    onErrorRef.current = onError;
+  });
+
   useEffect(() => {
     const viewer = viewerRef.current;
     const canvas = canvasRef.current;
@@ -28,23 +36,23 @@ export default function VirtualTeacherViewer({
         .then(() => {
           if (!active) return;
           setStatus('ready');
-          onReady?.(viewer);
+          onReadyRef.current?.(viewer);
         })
         .catch((error) => {
           if (!active) return;
           setStatus('error');
-          onError?.(error);
+          onErrorRef.current?.(error);
         });
     } catch (error) {
       setStatus('error');
-      onError?.(error);
+      onErrorRef.current?.(error);
     }
 
     return () => {
       active = false;
       viewer.dispose();
     };
-  }, [modelUrl, onError, onReady]);
+  }, [modelUrl]);
 
   return (
     <div className={`relative h-full w-full overflow-hidden ${className}`}>

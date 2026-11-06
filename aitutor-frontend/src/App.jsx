@@ -34,6 +34,7 @@ import { hasValidToken, saveToken } from './utils/tokenManager';
 import { checkAuth, devLogin } from './services/authService';
 import AiSettingsDialog from './components/settings/AiSettingsDialog';
 import { hasAiSettings } from './services/aiSettings';
+import { parsePptStructure } from './services/lectureService';
 
 export default function App() {
     const [isChecking, setIsChecking] = useState(true);
@@ -299,12 +300,8 @@ export default function App() {
                   onCreate={() => { setM5Params({ from: 'list' }); setM5Page('create'); }}
                   onEdit={(prepId) => { setM5Params({ prepId, from: 'list' }); setM5Page('edit'); }}
                   onPreviewPpt={(item) => {
-                    // 从 pptStructure 解析 slides 供 PPT 编辑页使用
-                    let slides = []
-                    try {
-                      const parsed = typeof item.pptStructure === 'string' ? JSON.parse(item.pptStructure) : item.pptStructure
-                      slides = parsed?.slides || parsed?.pages || []
-                    } catch (e) { /* ignore */ }
+                    // 统一用 parsePptStructure：兼容裸数组 / {slides}包装，并做 snake_case→驼峰映射
+                    const slides = parsePptStructure(item.pptStructure);
                     setM5Params({ pptId: item.prepId, pptSlides: slides, from: 'list' });
                     setM5Page('ppt-editor');
                   }}

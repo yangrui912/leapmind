@@ -451,15 +451,25 @@ class LessonPrepService:
                     "Stage2 课时「%s」仅生成 %d 页（缺内容页），追加强约束重试",
                     section.get("title", ""), len(slides_batch),
                 )
-                retry_messages = messages[:-1] + [AIMessage(
-                    role=MessageRole.USER,
-                    content=(
-                        "你刚才只输出了封面页，页数不足。请重新输出完整的幻灯片 JSON 数组："
-                        "必须包含 3-8 张幻灯片——1 张封面 + 至少 2 张内容页 + 互动/总结/作业页。"
-                        "每张幻灯片都要有 title 和 bullet_points（5-7 个信息点）。"
-                        "只输出 JSON 数组，不要输出任何其他内容。"
+                # 注意：必须保留原 user 消息（含章节教学内容）。
+                # 之前用 messages[:-1] 丢弃了教学内容，模型只看到系统提示词，
+                # 会编出"从教案到可视化幻灯片"这类与课程无关的元内容。
+                retry_messages = [
+                    messages[0],
+                    AIMessage(
+                        role=MessageRole.USER,
+                        content=(
+                            messages[1].content
+                            + "\n\n## 重试要求\n"
+                            "你刚才只输出了封面页，页数不足。请重新输出完整的幻灯片 JSON 数组："
+                            "必须包含 3-8 张幻灯片——1 张封面 + 至少 2 张内容页 + 互动/总结/作业页。"
+                            "每张幻灯片都要有 title 和 bullet_points（5-7 个信息点）。"
+                            "所有内容必须严格来自上面提供的教学内容（标题、核心内容、知识点、教学过程），"
+                            "禁止输出与教学内容无关的示例或关于'如何制作幻灯片'的方法说明。"
+                            "只输出 JSON 数组，不要输出任何其他内容。"
+                        ),
                     ),
-                )]
+                ]
                 retry_response = await self.provider.chat_completion(
                     retry_messages,
                     json_mode=True,
@@ -479,6 +489,20 @@ class LessonPrepService:
                     )
             except Exception as retry_error:
                 logger.warning("Stage2 追加重试失败（保留原结果）: %s", retry_error)
+
+        # 兜底：重试后仍只有封面（推理模型偶发行为），直接从大纲确定性合成内容页，
+        # 保证每个课时都有完整可用的幻灯片，绝不交付"光杆封面"。
+        has_content_slide = any(
+            s.get("type") in ("content", "interactive", "summary", "homework")
+            for s in slides_batch
+            if isinstance(s, dict) and not s.get("is_fallback")
+        )
+        if len(slides_batch) < 2 or not has_content_slide:
+            logger.warning(
+                "Stage2 课时「%s」AI 仍仅生成 %d 页，使用大纲内容合成完整幻灯片",
+                section.get("title", ""), len(slides_batch),
+            )
+            slides_batch = self._synthesize_slides_from_section(section, slides_batch)
 
         validated: list[dict] = []
         for slide in slides_batch:
@@ -502,6 +526,108 @@ class LessonPrepService:
                 slide = self.pipeline.get_fixed_data("slide", slide)
             validated.append(slide)
         return validated
+
+    @staticmethod
+    def _synthesize_slides_from_section(section: dict, existing: list[dict]) -> list[dict]:
+        """从大纲章节确定性合成幻灯片（AI 只吐出封面时的兜底）。
+
+        结构：保留已有封面 + 每个教学环节一张内容页 + 互动页 + 总结页 + 作业页。
+        全部内容取自大纲本身（key_points / difficult_points / teaching_process / homework），
+        不依赖 AI，保证与教学内容严格一致。
+        """
+        def _clip(text: str, limit: int = 90) -> str:
+            text = (text or "").strip().replace("\n", " ")
+            return text[:limit] + "…" if len(text) > limit else text
+
+        def _cover() -> dict:
+            cover = next(
+                (s for s in existing if isinstance(s, dict) and s.get("type") == "cover"),
+                None,
+            )
+            if cover:
+                return cover
+            return {
+                "type": "cover",
+                "title": section.get("title", "课程封面"),
+                "bullet_points": [_clip(k, 40) for k in (section.get("key_points") or [])[:4]] or ["本课时学习"],
+                "formula": "",
+                "highlight_points": [],
+            }
+
+        slides: list[dict] = [_cover()]
+
+        steps = section.get("teaching_process") or []
+        for idx, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            bullets = []
+            if step.get("teacher_activity"):
+                bullets.append(f"教师：{_clip(step['teacher_activity'])}")
+            if step.get("student_activity"):
+                bullets.append(f"学生：{_clip(step['student_activity'])}")
+            if step.get("design_intent"):
+                bullets.append(f"设计意图：{_clip(step['design_intent'])}")
+            if not bullets:
+                continue
+            slides.append({
+                "type": "content",
+                "title": f"{_clip(step.get('step') or f'环节{idx}', 24)}（{step.get('duration', '')}）".replace("（）", ""),
+                "bullet_points": bullets,
+                "formula": "",
+                "highlight_points": [_clip(k, 20) for k in (section.get("key_points") or [])[:2]],
+                "interaction": None,
+            })
+
+        if section.get("difficult_points"):
+            slides.append({
+                "type": "interactive",
+                "title": "想一想：突破难点",
+                "bullet_points": [_clip(d, 60) for d in section["difficult_points"][:3]],
+                "formula": "",
+                "highlight_points": [_clip(d, 16) for d in section["difficult_points"][:2]],
+                "interaction": {"type": "think_question", "question": "同桌讨论：你是怎么理解这些难点的？", "options": [], "answer": ""},
+            })
+        elif len(slides) > 1:
+            slides.append({
+                "type": "interactive",
+                "title": "课堂练习",
+                "bullet_points": [_clip(k, 60) for k in (section.get("key_points") or [])[:3]],
+                "formula": "",
+                "highlight_points": [],
+                "interaction": {"type": "practice", "question": "独立完成，同伴互评", "options": [], "answer": ""},
+            })
+
+        slides.append({
+            "type": "summary",
+            "title": "课堂小结",
+            "bullet_points": [_clip(k, 60) for k in (section.get("key_points") or [])[:5]] or ["回顾本课要点"],
+            "formula": "",
+            "highlight_points": [],
+            "interaction": None,
+        })
+
+        homework = section.get("homework") or {}
+        hw_items: list[str] = []
+        if isinstance(homework, dict):
+            for level in ("basic", "intermediate", "advanced", "基础", "提高", "拓展"):
+                value = homework.get(level)
+                if isinstance(value, list):
+                    hw_items.extend(_clip(str(v), 60) for v in value[:2])
+                elif isinstance(value, str) and value.strip():
+                    hw_items.append(_clip(value, 60))
+        elif isinstance(homework, list):
+            hw_items = [_clip(str(v), 60) for v in homework[:5]]
+        if hw_items:
+            slides.append({
+                "type": "homework",
+                "title": "课后作业",
+                "bullet_points": hw_items[:6],
+                "formula": "",
+                "highlight_points": [],
+                "interaction": None,
+            })
+
+        return slides
 
     async def _stage2_slides(self, ctx: PrepContext) -> AsyncGenerator[str, None]:
         """Generate slides: one AI call per syllabus section, yields per-slide events.

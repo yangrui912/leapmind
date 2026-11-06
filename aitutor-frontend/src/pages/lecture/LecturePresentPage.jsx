@@ -193,6 +193,61 @@ const MockSlideViewer = ({ slides, currentIndex, onPrev, onNext, onSlideChange }
   );
 };
 
+/**
+ * 把当前页课件转成口语化讲稿文本（喂给 TTS）。
+ * 兼容扁平（真实 M4/M5 产出：{ title, bulletPoints, formula, highlightPoints }）
+ * 与嵌套（历史 mock：{ content: { title, body, ... } }）两种数据形态。
+ * 之前只认嵌套格式的 content.title，真实课件取出来是空字符串，
+ * 语音适配器判定"本页无旁白"直接结束 —— 表现为"完全没有语音、秒显示讲解完成"。
+ *
+ * 口语化处理：
+ * - 有现成讲稿（narrationText，生成时 Stage3 产出）直接用；
+ * - 否则由页面内容组装自然语句：要点编号朗读、公式不念符号只提示看屏幕；
+ * - 清洗 markdown/LaTeX/HTML 等会念出乱码的符号。
+ */
+const CN_INDEX = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
+
+const toSpokenText = (v) =>
+  String(v ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\$\$?[^$]*\$\$?/g, '')   // LaTeX 公式整体不朗读
+    .replace(/\\[a-zA-Z]+/g, '')       // \lim \frac 等残留命令
+    .replace(/[*_#`~>|]/g, '')
+    .replace(/[{}[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const buildSlideNarration = (slide) => {
+  if (!slide || typeof slide !== 'object') return '';
+  if (slide.narrationText) return toSpokenText(slide.narrationText);
+  const nested = slide.content && typeof slide.content === 'object' ? slide.content : null;
+  const c = nested ? { ...slide, ...nested } : slide;
+  const parts = [];
+  const title = toSpokenText(c.title);
+  if (title) parts.push(`同学们，我们来看这一页：${title}。`);
+  const subtitle = toSpokenText(c.subtitle);
+  if (subtitle) parts.push(`${subtitle}。`);
+  const body = c.bulletPoints ?? c.body;
+  const items = (Array.isArray(body) ? body : body ? [body] : []).map(toSpokenText).filter(Boolean);
+  if (items.length) {
+    const spoken = items
+      .map((t, i) => (i < 10 ? `第${CN_INDEX[i]}，${t}` : t))
+      .join('。');
+    parts.push(`${spoken}。`);
+  }
+  const points = (Array.isArray(c.highlightPoints) ? c.highlightPoints : c.points || [])
+    .map(toSpokenText)
+    .filter(Boolean);
+  if (points.length) parts.push(`这一页的重点是：${points.join('；')}。大家要特别注意。`);
+  if (c.formula && !/\$\$?[^$]*\$\$?/.test(toSpokenText(c.formula))) {
+    // 公式不念符号，只引导看屏幕
+    parts.push('屏幕上给出了一个重要的公式，请大家先自己看一下，我们在下一页展开讲解。');
+  }
+  return parts.join(' ').trim();
+};
+
 const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
   const { lectureId, title = '在线课堂', courseId, slides: mockSlides } = lectureData || {};
   const hasMockSlides = Array.isArray(mockSlides) && mockSlides.length > 0;
@@ -267,11 +322,13 @@ const LecturePresentPage = ({ lectureData, userId = 1, onBack, onFinish }) => {
     courseId: courseId || lectureId || '',
     slideId: hasMockSlides ? String(currentSlide) : (remoteSlideMeta?.slideId || `remote-${currentSlide}`),
     pageNumber: currentSlide,
-    title: hasMockSlides ? (mockSlides[currentSlide - 1]?.content?.title || '') : (remoteSlideMeta?.title || ''),
+    title: hasMockSlides ? (mockSlides[currentSlide - 1]?.content?.title || mockSlides[currentSlide - 1]?.title || '') : (remoteSlideMeta?.title || ''),
     html_content: hasMockSlides ? '' : (remoteSlideMeta?.html_content || ''),
+    // 讲稿：真实课件（扁平格式）用 buildSlideNarration 组合标题+要点+重点；
+    // 若生成流程带了现成讲稿（narrationText）则优先使用
     narrationText: hasMockSlides
-      ? mockSlides[currentSlide - 1]?.content?.title || ''
-      : (remoteSlideMeta?.title || ''),
+      ? (mockSlides[currentSlide - 1]?.narrationText || buildSlideNarration(mockSlides[currentSlide - 1]) || '')
+      : (remoteSlideMeta?.title || remoteSlideMeta?.html_content || ''),
     // 不设置 hasPregeneratedAudio —— 由 adapter.start() 探测确认
     voiceType: selectedAvatar?.voiceType,
   };
