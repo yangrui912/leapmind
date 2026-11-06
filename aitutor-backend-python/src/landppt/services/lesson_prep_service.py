@@ -685,14 +685,18 @@ class LessonPrepService:
     # ════════════════════════════════════════════════════════════
 
     async def _save_to_db(self, ctx: PrepContext, quality_info: dict = None) -> int:
-        """Write the syllabus to teaching_contents table.
+        """Write the syllabus to the shared `teaching_contents` table.
+
+        注意：必须写 Java 主表 `teaching_contents`（前端列表/详情/PPT 编辑都读它），
+        而不是 Python 自己的 `py_teaching_contents` 影子表，否则生成成功但列表永远为空。
 
         Args:
             ctx: 备课上下文。
             quality_info: 质量报告（Layer 1 + LLM Judge），存入 generated_content_json。
         """
+        from sqlalchemy import text
+
         from ..database.database import AsyncSessionLocal
-        from ..database.models import TeachingContent
 
         generated_content = {
             "syllabus": ctx.syllabus,
@@ -705,35 +709,43 @@ class LessonPrepService:
                     ctx.knowledge_point_names or [""] * len(ctx.knowledge_point_ids),
                 )
             ],
+            # 生成参数留档，便于详情页展示与复现
+            "meta": {
+                "teachingGoals": ctx.teaching_goals,
+                "totalHours": ctx.total_hours,
+                "style": ctx.style,
+                "weakPointIds": ctx.weak_point_ids,
+            },
         }
         if quality_info:
             generated_content["quality"] = quality_info
 
         async with AsyncSessionLocal() as session:
-            record = TeachingContent(
-                user_id=ctx.user_id,
-                type="lesson_plan",
-                title=ctx.title,
-                source_type="from_weakpoint" if ctx.weak_point_ids else "from_text",
-                source_content_json=json.dumps({
+            result = await session.execute(
+                text(
+                    "INSERT INTO teaching_contents "
+                    "(user_id, title, status, type, subject, ppt_structure, generated_content_json) "
+                    "VALUES (:user_id, :title, :status, :type, :subject, :ppt_structure, :generated_content_json)"
+                ),
+                {
+                    "user_id": ctx.user_id,
                     "title": ctx.title,
+                    "status": "draft",
+                    "type": "ppt",
                     "subject": ctx.subject,
-                    "grade": ctx.grade,
-                    "knowledge_point_ids": ctx.knowledge_point_ids,
-                    "teaching_goals": ctx.teaching_goals,
-                    "total_hours": ctx.total_hours,
-                    "style": ctx.style,
-                    "weak_point_ids": ctx.weak_point_ids,
-                    "user_profile_summary": ctx.user_profile_summary,
-                }, ensure_ascii=False),
-                generated_content_json=json.dumps(generated_content, ensure_ascii=False),
-                ppt_structure_json=json.dumps(ctx.slides, ensure_ascii=False) if ctx.slides else json.dumps([]),
-                status="published",
+                    "ppt_structure": json.dumps(ctx.slides or [], ensure_ascii=False),
+                    "generated_content_json": json.dumps(generated_content, ensure_ascii=False),
+                },
             )
-            session.add(record)
+            new_id = result.lastrowid
+            # prep_id 是业务主键，历史上与自增 id 保持一致
+            await session.execute(
+                text("UPDATE teaching_contents SET prep_id = :id WHERE id = :id"),
+                {"id": new_id},
+            )
             await session.commit()
-            await session.refresh(record)
-            return record.id
+            logger.info("备课已保存 teaching_contents: id=%s title=%s", new_id, ctx.title)
+            return int(new_id)
 
     # ════════════════════════════════════════════════════════════
     # [generate-ppt] Standalone PPT generation (non-streaming JSON)
@@ -763,30 +775,31 @@ class LessonPrepService:
             ValueError: 备课记录不存在或没有教学大纲数据。
             Exception: AI生成或数据库写入失败。
         """
-        from sqlalchemy import select, update
-        from ..database.database import AsyncSessionLocal
-        from ..database.models import TeachingContent
+        from sqlalchemy import text
 
-        # 1. 读取备课记录
+        from ..database.database import AsyncSessionLocal
+
+        # 1. 读取备课记录（读 Java 主表 teaching_contents）
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(TeachingContent).where(TeachingContent.id == prep_id)
+                text("SELECT id, user_id, title, generated_content_json FROM teaching_contents WHERE id = :id"),
+                {"id": prep_id},
             )
-            record = result.scalar_one_or_none()
+            record = result.mappings().first()
 
         if record is None:
             raise ValueError(f"备课记录 {prep_id} 不存在")
 
         # 2. 解析已保存的教学大纲
-        content = json.loads(record.generated_content_json or "{}")
+        content = json.loads(record["generated_content_json"] or "{}")
         syllabus = content.get("syllabus", {})
         if not syllabus:
             raise ValueError(f"备课记录 {prep_id} 中没有教学大纲数据，无法生成PPT")
 
         # 3. 构造简版上下文
         ppt_ctx = PrepContext(
-            user_id=record.user_id,
-            title=record.title,
+            user_id=record["user_id"],
+            title=record["title"],
             subject="",
             grade="",
             knowledge_point_ids=[],
@@ -810,18 +823,15 @@ class LessonPrepService:
         except Exception as e:
             logger.error(f"PPT 配图步骤异常（继续导出纯文字版）: {e}")
 
-        # 5. 更新数据库中的 PPT 结构
+        # 5. 更新数据库中的 PPT 结构（Java 主表 teaching_contents）
         if all_slides:
             async with AsyncSessionLocal() as session:
                 await session.execute(
-                    update(TeachingContent)
-                    .where(TeachingContent.id == prep_id)
-                    .values(
-                        ppt_structure_json=json.dumps(
-                            all_slides, ensure_ascii=False
-                        ),
-                        updated_at=datetime.utcnow(),
-                    )
+                    text("UPDATE teaching_contents SET ppt_structure = :slides WHERE id = :id"),
+                    {
+                        "slides": json.dumps(all_slides, ensure_ascii=False),
+                        "id": prep_id,
+                    },
                 )
                 await session.commit()
 

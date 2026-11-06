@@ -38,7 +38,19 @@ const TABS = [
 
 // ─── 简化版幻灯片渲染（用于 mock 数据，避免依赖远端 SlideViewer） ───
 const renderSlideHTML = (slide) => {
-  const c = slide?.content || {};
+  // 兼容两种数据形态：
+  //  1) 扁平（Python / lectureService 真实产出）：{ title, bulletPoints, formula, highlightPoints }
+  //  2) 嵌套（历史 mock 数据）：{ type, content: { title, body, formula, highlightPoints } }
+  const nested = slide?.content && typeof slide.content === 'object' ? slide.content : null;
+  const c = nested
+    ? { ...slide, ...nested }
+    : {
+        title: slide?.title,
+        subtitle: slide?.subtitle,
+        body: slide?.bulletPoints ?? slide?.body,
+        formula: slide?.formula,
+        highlightPoints: slide?.highlightPoints,
+      };
   const isCover = slide?.type === 'cover';
   const isEnding = slide?.type === 'ending';
   const body = Array.isArray(c.body) ? c.body : (c.body ? [c.body] : []);

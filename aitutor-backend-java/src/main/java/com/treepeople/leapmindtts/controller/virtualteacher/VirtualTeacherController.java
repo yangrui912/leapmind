@@ -29,6 +29,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+@lombok.extern.slf4j.Slf4j
 @RestController
 @RequestMapping("/api/virtual-teacher")
 @RequiredArgsConstructor
@@ -96,7 +97,21 @@ public class VirtualTeacherController {
             @Valid @RequestBody VirtualTeacherTtsRequest request) {
         Long userId = requireUserId(httpRequest);
         VirtualTeacherTtsService.StreamingPlan plan = ttsService.stream(userId, request);
-        StreamingResponseBody body = output -> ttsService.writeStream(plan, output, userId, request);
+        StreamingResponseBody body = output -> {
+            try {
+                ttsService.writeStream(plan, output, userId, request);
+            } catch (Exception error) {
+                // 响应已按 application/octet-stream 提交，异常无法再转成 JSON 错误；
+                // 交给全局异常处理器会抛 HttpMessageNotWritableException 并直接断连，
+                // 前端表现为"讲一半卡死"。此处记录后正常结束流，已发送的音频仍可播放。
+                log.warn("流式 TTS 中途结束（已发送部分音频仍有效）: {}", error.getMessage());
+                try {
+                    output.flush();
+                } catch (java.io.IOException ignored) {
+                    // 客户端已断开
+                }
+            }
+        };
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("application/octet-stream"))
                 .header("X-Audio-Format", "pcm-s16")
