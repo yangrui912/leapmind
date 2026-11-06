@@ -400,6 +400,25 @@ class LessonPrepService:
             )
             raw = response.content
             parsed = JSONExtractor.extract(raw, fallback=[])
+
+            # AI 有时返回 {"slides": [...]} / {"pages": [...]} 包装对象而不是裸数组，
+            # 直接当成单个 slide 会因缺少 title 而全部退化成"内容生成失败"。
+            if isinstance(parsed, dict):
+                unwrapped = None
+                for key in ("slides", "pages", "data", "items"):
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        unwrapped = value
+                        break
+                if unwrapped is not None:
+                    parsed = unwrapped
+                else:
+                    parsed = [parsed] if parsed.get("title") else []
+                    if not parsed:
+                        logger.warning(
+                            "Stage2 返回对象既无 slide 数组也无 title，keys=%s",
+                            list(parsed.keys())[:8] if isinstance(parsed, dict) else "-",
+                        )
         except Exception as e:
             logger.warning(f"Slide generation failed for section '{section.get('title', '')}': {e}")
             ctx.errors.append({
@@ -741,11 +760,24 @@ class LessonPrepService:
                 },
             )
             new_id = result.lastrowid
-            # prep_id 是业务主键，历史上与自增 id 保持一致
-            await session.execute(
-                text("UPDATE teaching_contents SET prep_id = :id WHERE id = :id"),
-                {"id": new_id},
-            )
+            # prep_id 是业务主键，历史上与自增 id 保持一致。
+            # 注意：prep_id 有唯一约束，若历史脏数据占用了同一个值，UPDATE 会失败并
+            # 回滚整个事务——表现为"生成了但记录凭空消失、详情 404"。
+            # 因此这里先清理冲突值，并且 UPDATE 失败不影响记录本身。
+            try:
+                await session.execute(
+                    text("UPDATE teaching_contents SET prep_id = NULL "
+                         "WHERE prep_id = :id AND id <> :id"),
+                    {"id": new_id},
+                )
+                await session.execute(
+                    text("UPDATE teaching_contents SET prep_id = :id WHERE id = :id"),
+                    {"id": new_id},
+                )
+            except Exception as conflict:
+                logger.warning(
+                    "prep_id 回填失败（记录已保存，prep_id 留空）: id=%s %s", new_id, conflict
+                )
             await session.commit()
             logger.info("备课已保存 teaching_contents: id=%s title=%s", new_id, ctx.title)
             return int(new_id)
@@ -838,7 +870,17 @@ class LessonPrepService:
                 )
                 await session.commit()
 
-        # 6. 返回 (pptId, slides)，pptId 复用 prepId
+        # 6. 配图 URL 归一化：Python 内部生成的是 http://localhost:8000/api/image/view/xxx，
+        #    浏览器访问 localhost 会指向用户本机而失败。改为相对路径，
+        #    由 nginx 把 /api/image/ 反代到 Python。
+        for slide in all_slides:
+            url = slide.get("image_url") or slide.get("imageUrl")
+            if isinstance(url, str) and "/api/image/" in url:
+                relative = url[url.index("/api/image/"):]
+                slide["image_url"] = relative
+                slide["imageUrl"] = relative
+
+        # 7. 返回 (pptId, slides)，pptId 复用 prepId
         return prep_id, all_slides
 
     # ════════════════════════════════════════════════════════════
