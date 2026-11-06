@@ -1,92 +1,115 @@
 package com.treepeople.leapmindtts.controller.lesson;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.treepeople.leapmindtts.pojo.entity.TeachingContent;
-import com.treepeople.leapmindtts.pojo.result.ApiResponse;
-import com.treepeople.leapmindtts.service.PythonApiClient;
-import com.treepeople.leapmindtts.service.TeachingContentService;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.tags.Tag;
+import com.treepeople.leapmindtts.pojo.dto.AiOverride;
+import com.treepeople.leapmindtts.service.ai.AiOverrideResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 
-import java.util.HashMap;
+import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * AI 备课生成控制器 — 对应 M5 文档 4.1.1 接口 POST /api/lesson-prep/generate
+ * AI 备课生成 — 直接透传 Python 的流式接口。
+ *
+ * <p>Python 端（landppt）已实现完整的备课三段管线并自行落库，
+ * Java 只负责鉴权、注入用户自填的 AI 配置、以及 SSE 转发。
+ * 这样可以原样使用 Python 的 {@code parallel} 并发能力，避免 Java 侧再维护一份逻辑。</p>
  */
 @Slf4j
 @RestController
 @RequestMapping("/api/lesson-prep")
 @RequiredArgsConstructor
-@Tag(name = "AI备课生成", description = "AI备课内容生成接口")
 public class LessonPrepController {
 
-    private final PythonApiClient pythonApiClient;
-    private final TeachingContentService teachingContentService;
-    private final ObjectMapper om;
-
-    private static final String STATUS_DRAFT = "draft";
+    private final WebClient.Builder webClientBuilder;
+    private final AiOverrideResolver aiOverrideResolver;
 
     /**
-     * [联桥] 生成备课 — 调用 Python AI 服务生成大纲+PPT结构，保存到 DB。
-     *
-     * <h3>完整链路</h3>
-     * <ol>
-     *   <li>前端 POST /api/lesson-prep/generate（传 title/subject/grade/knowledgePointIds 等）</li>
-     *   <li>Java → Python POST /api/internal/ai/generate-lesson-prep</li>
-     *   <li>Python 生成 syllabus + slides（已写入 DB）并返回 JSON</li>
-     *   <li>Java 将 slides（camelCase）写入 teaching_contents.ppt_structure，
-     *       syllabus + 元数据写入 generated_content_json</li>
-     *   <li>返回 prepId + slides 预览给前端</li>
-     * </ol>
+     * 备课接口在 landppt 主服务（8000），不是 M2 服务（8001）。
      */
-    @PostMapping("/generate")
-    @Operation(summary = "[联桥] 生成备课", description = "调用 Python AI 服务生成备课内容并保存到数据库")
-    public ResponseEntity<ApiResponse<Map<String, Object>>> generateLessonPrep(
-            @RequestBody PythonApiClient.LessonPrepRequest request) {
-        log.info("[联桥] 收到备课生成请求: title={}, subject={}", request.getTitle(), request.getSubject());
+    @Value("${python.lesson-prep.base-url:http://localhost:8000}")
+    private String pythonBaseUrl;
 
-        try {
-            // Step 1: 调用 Python 生成备课大纲 + PPT 结构
-            PythonApiClient.LessonPrepResponse pythonResult =
-                    pythonApiClient.generateLessonPrep(request);
+    /** 复用一个 WebClient，避免每次请求新建连接池导致连接被重置 */
+    private WebClient client;
 
-            // Step 2: 将 Python 返回的 slides（已转 camelCase）写入 ppt_structure，
-            //         syllabus + 元数据（subject/grade/knowledgePointIds）写入 generated_content_json
-            Map<String, Object> generatedContent = new HashMap<>();
-            generatedContent.put("syllabus", pythonResult.getSyllabus());
-            generatedContent.put("subject", request.getSubject());
-            generatedContent.put("grade", request.getGrade());
-            generatedContent.put("knowledgePointIds", request.getKnowledgePointIds());
+    @jakarta.annotation.PostConstruct
+    void initClient() {
+        this.client = webClientBuilder.build();
+    }
 
-            TeachingContent content = TeachingContent.builder()
-                    .userId((long) request.getUserId())
-                    .title(request.getTitle())
-                    .status(STATUS_DRAFT)
-                    .type("ppt")
-                    .pptStructure(om.writeValueAsString(pythonResult.getSlides()))
-                    .generatedContentJson(om.writeValueAsString(generatedContent))
-                    .build();
-            teachingContentService.save(content);
-
-            // prep_id 是生成列（恒等于 id），返回给前端的 prepId 统一取 content.getId()
-            Map<String, Object> data = new HashMap<>();
-            data.put("prepId", content.getId());
-            data.put("totalPages", pythonResult.getTotalPages());
-            data.put("slidesPreview", pythonResult.getSlides());
-
-            log.info("[联桥] 备课生成完成, prepId={}, totalPages={}",
-                    content.getId(), pythonResult.getTotalPages());
-            return ResponseEntity.ok(ApiResponse.success(data, "备课生成成功"));
-
-        } catch (Exception e) {
-            log.error("[联桥] 备课生成失败", e);
-            return ResponseEntity.internalServerError()
-                    .body(ApiResponse.error(500, "备课生成失败: " + e.getMessage()));
+    /**
+     * 流式生成备课（SSE）。
+     *
+     * <p>事件：outline → section × N → done（含 prep_id）；异常时 error。</p>
+     */
+    @PostMapping(value = "/generate", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> generate(@RequestBody Map<String, Object> body) {
+        Map<String, Object> payload = new LinkedHashMap<>(body == null ? Map.of() : body);
+        AiOverride override = aiOverrideResolver.current();
+        if (override != null) {
+            payload.put("aiOverride", override);
         }
+        // 默认开启并行（前端未显式指定时），明显缩短多课时生成耗时
+        payload.putIfAbsent("parallel", true);
+
+        log.info("[M5] 备课生成请求: title={}, parallel={}",
+                payload.get("title"), payload.get("parallel"));
+
+        return client.post()
+                .uri(pythonBaseUrl + "/api/lesson-prep/generate")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToFlux(String.class)
+                .doOnNext(raw -> log.info("[M5] 收到片段({} 字): {}",
+                        raw == null ? 0 : raw.length(),
+                        raw == null ? "" : raw.substring(0, Math.min(120, raw.length()))))
+                .map(event -> {
+                    // 与 M2 相同的成熟写法：bodyToFlux(String) 拿到的是 data 内容（可能是纯 JSON，
+                    // 也可能带 Python 原始的 "data:" 前缀）；Spring MVC 写响应时会统一加 "data:"，
+                    // 因此这里必须剥掉已有前缀，否则出现 "data:data:"，前端 JSON.parse 全失败。
+                    if (event == null) {
+                        return "";
+                    }
+                    String trimmed = event.trim();
+                    if (trimmed.startsWith("data:")) {
+                        trimmed = trimmed.substring(5).trim();
+                    }
+                    return trimmed;
+                })
+                .filter(s -> !s.isEmpty())
+                .timeout(Duration.ofMinutes(10))
+                .onErrorResume(err -> {
+                    log.error("[M5] 备课生成失败: {} / {}", err.getClass().getName(), err.getMessage(), err);
+                    String message = sanitize(err.getMessage());
+                    // Spring 会自动加 "data:" 前缀，这里只返回 JSON 本体
+                    return Flux.just("{\"type\":\"error\",\"message\":\"" + escapeJson(message) + "\"}");
+                });
+    }
+
+    private static String sanitize(String message) {
+        if (message == null || message.isBlank()) {
+            return "备课生成失败";
+        }
+        String cleaned = message.replaceAll("sk-[A-Za-z0-9_\\-]{8,}", "sk-***");
+        cleaned = cleaned.replaceAll("\\s+", " ").trim();
+        return cleaned.length() > 240 ? cleaned.substring(0, 240) : cleaned;
+    }
+
+    private static String escapeJson(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ");
     }
 }

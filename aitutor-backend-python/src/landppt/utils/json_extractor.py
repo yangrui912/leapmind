@@ -38,6 +38,12 @@ class JSONExtractor:
         Raises:
             JSONExtractionError: If fallback is None and all strategies fail.
         """
+        # 兼容传入 AIResponse 对象（provider.chat_completion 的返回值）：
+        # 取其中的 content 字符串，避免上游直接对对象调用 .strip() 崩溃
+        if not isinstance(text, str):
+            content = getattr(text, "content", None)
+            text = content if isinstance(content, str) else str(text)
+
         if not text or not text.strip():
             return JSONExtractor._handle_failure("Empty input", fallback)
 

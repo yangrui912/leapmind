@@ -63,7 +63,13 @@ const MOCK_KNOWLEDGE_POINTS = {
  */
 export async function getWeakPoints(userId) {
   const res = await get(`/api/weak-points`, { userId })
-  return res.data
+  const data = res.data
+  // 后端返回分页对象 {total, pages, records}，旧版返回数组——两者兼容，
+  // 否则页面拿到对象后 weakPoints.map 会崩溃导致整页白屏
+  if (Array.isArray(data)) return data
+  if (Array.isArray(data?.records)) return data.records
+  if (Array.isArray(data?.items)) return data.items
+  return []
 }
 
 /**
@@ -90,7 +96,8 @@ export async function generateLessonPrep(params, onEvent) {
         style: params.style || 'standard',
         weakPointIds: params.weakPointIds || [],
         userProfileSummary: params.userProfileSummary || null,
-        parallel: params.parallel || false,
+        // 默认开启并行：多课时串行调用 AI 是备课慢的主因
+        parallel: params.parallel !== false,
       }),
     })
     const reader = res.body.getReader()

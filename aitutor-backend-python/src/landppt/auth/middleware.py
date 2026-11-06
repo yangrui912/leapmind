@@ -43,6 +43,7 @@ class AuthMiddleware:
             "/api/internal/",  # M6 画像引擎等内部接口，由 Java 网关调用无需前端认证
             "/api/user-profile/",  # M6 知识状态、时间线等查询接口
             "/api/ai/",  # M4 Java→Python 讲课生成接口，服务间调用不走浏览器会话鉴权
+            "/api/lesson-prep/",  # M5 备课生成/目标/过程/PPT，由 Java 网关调用并已完成鉴权
             "/docs",
             "/redoc",
             "/openapi.json"
@@ -64,7 +65,20 @@ class AuthMiddleware:
     async def __call__(self, request: Request, call_next: Callable):
         """Middleware function"""
         path = request.url.path
-        
+
+        # 用户自填 AI 配置：前端经 nginx 直连 Python 时通过请求头传入，
+        # 这里写入请求级 ContextVar，供 provider 工厂使用（不落库、不打日志）。
+        base_url = request.headers.get("x-ai-base-url")
+        api_key = request.headers.get("x-ai-token")
+        model = request.headers.get("x-ai-model")
+        if base_url and api_key:
+            from ..ai.providers import set_ai_override
+            set_ai_override({
+                "base_url": base_url,
+                "api_key": api_key,
+                **({"model": model} if model else {}),
+            })
+
         # Skip authentication for public paths
         if self.is_public_path(path):
             response = await call_next(request)

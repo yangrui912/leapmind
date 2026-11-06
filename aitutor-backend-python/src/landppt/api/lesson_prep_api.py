@@ -13,9 +13,32 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from ..ai.providers import set_ai_override
 from ..services.lesson_prep_service import LessonPrepService, convert_keys_camel
 
 router = APIRouter(prefix="/api/lesson-prep", tags=["Lesson Preparation"])
+
+
+def _apply_override(override: Optional[dict]) -> None:
+    """把用户自填的 AI 配置写入当前请求上下文（不存在则不改变）。
+
+    不用 token/reset：StreamingResponse 的生成器可能运行在子上下文，
+    跨上下文 reset 会抛 ValueError；每个请求的 context 副本独立，请求结束即消亡。
+    """
+    if not override or not isinstance(override, dict):
+        return
+    config = {}
+    base_url = override.get("baseUrl") or override.get("base_url")
+    credential = override.get("apiKey") or override.get("api_key")
+    model = override.get("model")
+    if base_url:
+        config["base_url"] = base_url
+    if credential:
+        config["api_key"] = credential
+    if model:
+        config["model"] = model
+    if config:
+        set_ai_override(config)
 
 
 # ─── Request models ───
@@ -36,6 +59,7 @@ class LessonPrepRequest(BaseModel):
     weak_point_ids: list[int] = Field(default_factory=list, alias="weakPointIds", description="薄弱知识点ID列表（可选）")
     user_profile_summary: Optional[str] = Field(default=None, alias="userProfileSummary", description="用户画像摘要（M6注入，可选）")
     parallel: bool = Field(default=False, description="[Layer 3] 是否启用并行加速（Stage 2/3 限流并发，3倍以上加速）")
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 class GeneratePPTRequest(BaseModel):
@@ -45,6 +69,7 @@ class GeneratePPTRequest(BaseModel):
     prep_id: int = Field(..., alias="prepId", description="备课内容ID（teaching_contents 表主键）")
     template_style: str = Field(default="default", alias="templateStyle", description="PPT模板风格")
     max_slides: int = Field(default=20, ge=4, le=50, alias="maxSlides", description="最大页数")
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 class GenerateGoalsRequest(BaseModel):
@@ -58,6 +83,7 @@ class GenerateGoalsRequest(BaseModel):
     grade: str = Field(..., description="年级: grade_7 ~ grade_12")
     goal_direction: Optional[str] = Field(default=None, alias="goalDirection", description="教学方向提示")
     weak_point_ids: list[int] = Field(default_factory=list, alias="weakPointIds", description="薄弱知识点ID（可选）")
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 class GenerateProcessRequest(BaseModel):
@@ -73,6 +99,7 @@ class GenerateProcessRequest(BaseModel):
     total_hours: int = Field(default=1, ge=1, le=10, alias="totalHours", description="课时数")
     section_index: int = Field(default=1, alias="sectionIndex", description="当前课时序号")
     section_title: Optional[str] = Field(default=None, alias="sectionTitle", description="当前课时标题")
+    aiOverride: Optional[dict] = Field(default=None, description="用户自填 AI 配置")
 
 
 # ─── SSE streaming endpoints ───
@@ -90,6 +117,7 @@ async def generate_lesson_prep(request: LessonPrepRequest):
     异常时返回:
       error — 包含 stage 和 message 字段
     """
+    _apply_override(request.aiOverride)
     service = LessonPrepService(parallel=request.parallel)
     return StreamingResponse(
         service.run_stream(
@@ -127,6 +155,7 @@ async def generate_ppt(request: GeneratePPTRequest):
       "slides": [{...}]     // PPT结构JSON数组
     }
     """
+    _apply_override(request.aiOverride)
     service = LessonPrepService()
     try:
         ppt_id, slides = await service.generate_ppt(
@@ -160,6 +189,7 @@ async def generate_goals(request: GenerateGoalsRequest):
     }
     """
     service = LessonPrepService()
+    _apply_override(request.aiOverride)
     try:
         result = await service.generate_goals(
             subject=request.subject,
@@ -196,6 +226,7 @@ async def generate_process(request: GenerateProcessRequest):
       ]
     }
     """
+    _apply_override(request.aiOverride)
     service = LessonPrepService()
     try:
         result = await service.generate_process(
