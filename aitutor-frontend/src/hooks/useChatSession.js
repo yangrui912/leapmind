@@ -271,8 +271,20 @@ export function useChatSession({ sceneType, context, userId, autoRestore = true,
     function read() {
       reader.read().then(({ done, value }) => {
         if (done) {
-          // 流自然结束（无终端事件，如连接被服务端正常关闭）
+          // 流自然结束（无 done/error 终端事件）：保留已生成内容；
+          // 若一个字都没收到，明确提示，避免界面停在空占位
+          const captured = bufferRef.current;
           finishGenerating('idle');
+          if (captured) {
+            finalizeMessage(captured);
+            if (typeof onAssistantCompleteRef.current === 'function') {
+              onAssistantCompleteRef.current(captured);
+            }
+          } else {
+            dropEmptyPlaceholder();
+            setError({ message: 'AI 没有返回内容，请重试或更换模型', code: 2001 });
+          }
+          bufferRef.current = '';
           return;
         }
         if (value && value.type) {

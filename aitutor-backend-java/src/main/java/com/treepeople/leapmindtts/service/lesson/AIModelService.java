@@ -212,6 +212,8 @@ public class AIModelService {
                 .uri(baseUrl + "/chat/completions")
                 .header("Authorization", "Bearer " + override.getApiKey())
                 .contentType(MediaType.APPLICATION_JSON)
+                // 部分网关只有显式 Accept SSE 时才真正流式返回，否则返回空 body
+                .accept(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
                 .onStatus(status -> !status.is2xxSuccessful(), response ->
@@ -223,10 +225,11 @@ public class AIModelService {
                     })
                 )
                 .bodyToFlux(String.class)
+                .doOnNext(raw -> log.debug("用户自填 AI 原始片段({} 字)", raw == null ? 0 : raw.length()))
                 // 建连阶段的 429/5xx 自动退避重试（此时还未输出任何内容，重试无重复风险）；
                 // 流已经开始后的错误不重试，避免内容重复推送
-                .retryWhen(reactor.util.retry.Retry.backoff(3, Duration.ofSeconds(20))
-                        .maxBackoff(Duration.ofSeconds(90))
+                .retryWhen(reactor.util.retry.Retry.backoff(3, Duration.ofSeconds(15))
+                        .maxBackoff(Duration.ofSeconds(60))
                         .filter(err -> err instanceof org.springframework.web.reactive.function.client.WebClientResponseException webErr
                                 && (webErr.getStatusCode().value() == 429 || webErr.getStatusCode().value() >= 500))
                         .doBeforeRetry(sig -> log.warn("用户自填 AI 触发限流/服务波动，第 {} 次重试",
@@ -236,35 +239,71 @@ public class AIModelService {
                         return Flux.empty();
                     }
                     List<AiChunk> chunks = new ArrayList<>();
+
+                    // 逐行解析，兼容三种网关实现：
+                    //  A) 标准 SSE：  data: {...
+                    //  B) 裸 JSON 行：{...}（无 data: 前缀，实测 deepseek 系网关如此）
+                    //  C) 一次性完整响应：choices[0].message.content
                     for (String line : event.split("\n")) {
                         String trimmed = line.trim();
-                        if (trimmed.isEmpty() || !trimmed.startsWith("data:")) continue;
-                        String payload = trimmed.substring(5).trim();
+                        if (trimmed.isEmpty()) continue;
+                        if (trimmed.startsWith("event:") || trimmed.startsWith("id:") || trimmed.startsWith(":")) {
+                            continue;
+                        }
+                        String payload = trimmed.startsWith("data:")
+                                ? trimmed.substring(5).trim()
+                                : trimmed;
                         if (payload.isEmpty()) continue;
                         if ("[DONE]".equals(payload)) {
                             chunks.add(new AiChunk("", true, null, null));
                             continue;
                         }
+                        if (!payload.startsWith("{")) continue;
+
                         try {
                             var json = objectMapper.readTree(payload);
-                            var choices = json.path("choices");
-                            String text = "";
-                            if (choices.isArray() && choices.size() > 0) {
-                                text = choices.get(0).path("delta").path("content").asText("");
-                            }
                             Integer inTokens = null, outTokens = null;
                             var usage = json.path("usage");
                             if (!usage.isMissingNode() && !usage.isNull()) {
                                 if (usage.path("prompt_tokens").isInt()) inTokens = usage.path("prompt_tokens").asInt();
                                 if (usage.path("completion_tokens").isInt()) outTokens = usage.path("completion_tokens").asInt();
                             }
+
+                            var choices = json.path("choices");
+                            String text = "";
+                            boolean finished = false;
+                            if (choices.isArray() && choices.size() > 0) {
+                                var choice = choices.get(0);
+                                var delta = choice.path("delta");
+                                if (!delta.isMissingNode() && !delta.isNull()) {
+                                    text = delta.path("content").asText("");
+                                    if (text.isEmpty()) {
+                                        // 推理模型（deepseek-r/思考档）正文在 reasoning_content
+                                        text = delta.path("reasoning_content").asText("");
+                                    }
+                                }
+                                if (text.isEmpty()) {
+                                    // 一次性响应（非流式）或最后一个 chunk 带完整 message
+                                    text = choice.path("message").path("content").asText("");
+                                    if (text.isEmpty()) {
+                                        text = choice.path("message").path("reasoning_content").asText("");
+                                    }
+                                    if (!text.isEmpty()) finished = true;
+                                }
+                                String finish = choice.path("finish_reason").asText("");
+                                if (!finish.isEmpty() && !"null".equals(finish)) finished = true;
+                            } else {
+                                // 某些网关把文本放在 output.text
+                                text = json.path("output").path("text").asText("");
+                            }
+
                             if (!text.isEmpty()) {
-                                chunks.add(new AiChunk(text, false, inTokens, outTokens));
-                            } else if (inTokens != null) {
+                                chunks.add(new AiChunk(text, finished, inTokens, outTokens));
+                            } else if (finished || inTokens != null) {
                                 chunks.add(new AiChunk("", true, inTokens, outTokens));
                             }
                         } catch (Exception e) {
-                            log.warn("解析 OpenAI 兼容流式响应行失败: {}", e.getMessage());
+                            log.debug("跳过无法解析的响应片段: {}", e.getMessage());
                         }
                     }
                     return Flux.fromIterable(chunks);
