@@ -16,19 +16,32 @@
  *                ↑                 ↓
  *                ←── history ←─────┘
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import LectureCreatePage from './LectureCreatePage';
 import LectureWaitingPage from './LectureWaitingPage';
 import LecturePresentPage from './LecturePresentPage';
 import LectureHistoryPage from './LectureHistoryPage';
 import { getUserInfo } from '../../utils/tokenManager';
 
-export default function M4LectureContainer({ onExit, onM1Practice, initialText }) {
+export default function M4LectureContainer({ onExit, onM1Practice, initialText, initialLecture }) {
   const [route, setRoute] = useState('create'); // create | waiting | present | history
   const [params, setParams] = useState(null);
   const [result, setResult] = useState(null);
   const userInfo = getUserInfo();
   const userId = userInfo?.id ?? userInfo?.userId;
+
+  // 从 M5 备课 PPT 直接进入讲课：跳过创建/等待，直接进演示页
+  useEffect(() => {
+    if (initialLecture && Array.isArray(initialLecture.slides) && initialLecture.slides.length > 0) {
+      setResult({
+        lectureId: initialLecture.lectureId,
+        title: initialLecture.title || '备课讲课',
+        slides: initialLecture.slides,
+        courseId: initialLecture.courseId,
+      });
+      setRoute('present');
+    }
+  }, [initialLecture]);
 
   const handleStartGeneration = useCallback((p) => {
     if (Array.isArray(p?.importedSlides) && p.importedSlides.length > 0) {

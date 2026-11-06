@@ -47,6 +47,8 @@ export default function App() {
     const [learningProfileView, setLearningProfileView] = useState(null); // null | overview | detail
     const [selectedKnowledgePointId, setSelectedKnowledgePointId] = useState(null);
     const [m4Page, setM4Page] = useState(null); // null | 'active' — M4 讲课全屏容器
+    // 从 M5 备课 PPT 直接进入讲课时携带的幻灯片数据
+    const [m4LectureData, setM4LectureData] = useState(null);
     const [m4InitialText, setM4InitialText] = useState(''); // M4 搜索栏带入的初始内容
     const [m1Page, setM1Page] = useState(null); // null | practice | question-bank | mistakes | statistics | ranking
     const [m1PracticeParams, setM1PracticeParams] = useState({}); // M1 做题页参数（mode/lessonId 等）
@@ -132,7 +134,12 @@ export default function App() {
         <div className={isAuthed ? "flex h-screen bg-slate-100 text-slate-800" : "w-full h-screen"}>
             <GlobalStyles />
             {m4Page === 'active' ? (
-                <M4LectureContainer onExit={handleExitM4} onM1Practice={handleLaunchM1} initialText={m4InitialText} />
+                <M4LectureContainer
+                  onExit={handleExitM4}
+                  onM1Practice={handleLaunchM1}
+                  initialText={m4InitialText}
+                  initialLecture={m4LectureData}
+                />
             ) : m1Page ? (
                 <div className="flex flex-col w-full h-full bg-slate-50">
                     <header className="shrink-0 bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-4 flex-wrap shadow-sm">
@@ -273,6 +280,18 @@ export default function App() {
                   pptId={m5Params.pptId}
                   initialSlides={m5Params.pptSlides}
                   onBack={() => { const from = m5Params.from; setM5Params({}); setM5Page(from === 'edit' ? 'edit' : 'list'); }}
+                  onStartLecture={(slides) => {
+                    // 从备课 PPT 直接进入讲课：把当前幻灯片交给 M4 演示页
+                    if (!Array.isArray(slides) || slides.length === 0) return;
+                    setM4LectureData({
+                      slides,
+                      title: '备课讲课',
+                      lectureId: m5Params.pptId || 'prep',
+                      courseId: m5Params.pptId ? String(m5Params.pptId) : 'prep',
+                    });
+                    setM5Page(null);
+                    setM4Page('active');
+                  }}
                 />
             ) : m5Page === 'list' ? (
                 <LessonPrepListPage

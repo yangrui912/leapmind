@@ -36,7 +36,7 @@ const scrollbarStyles = `
   .m5-list-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 `
 
-export default function PptEditorPage({ pptId, initialSlides, onBack }) {
+export default function PptEditorPage({ pptId, initialSlides, onBack, onStartLecture }) {
   const [userId, setUserId] = useState(null)
   const [title, setTitle] = useState('PPT 预览')
   const [slides, setSlides] = useState(initialSlides || [])
@@ -250,7 +250,13 @@ export default function PptEditorPage({ pptId, initialSlides, onBack }) {
               {exporting ? '导出中...' : '导出PPTX'}
             </button>
             <button
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white text-sm font-medium hover:opacity-90 transition-all shadow-lg shadow-purple-500/20"
+              onClick={() => {
+                if (typeof onStartLecture === 'function') {
+                  onStartLecture(slides)
+                }
+              }}
+              disabled={!Array.isArray(slides) || slides.length === 0}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gradient-to-r from-purple-500 to-blue-500 text-white text-sm font-medium hover:opacity-90 transition-all shadow-lg shadow-purple-500/20 disabled:opacity-50"
             >
               <Presentation className="w-4 h-4" />
               开始讲课
