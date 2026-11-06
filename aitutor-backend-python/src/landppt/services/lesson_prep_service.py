@@ -357,9 +357,12 @@ class LessonPrepService:
 
         ctx.syllabus = syllabus
 
-        # Emit outline event (full syllabus)
+        # 前端（M5 编辑页）按 camelCase 读取字段（coreContent / teachingGoals /
+        # keyPoints / difficultPoints / teachingProcess），而 AI 按 prompt 输出的是
+        # snake_case；不转换会导致页面大片空白、看起来像"需要自己填"。
+        # 内部 ctx.syllabus 仍保留 snake_case 供 Stage 2 使用。
         yield _sse_event("outline", {
-            "content": syllabus,
+            "content": convert_keys_camel(syllabus),
         })
 
         # Emit per-section events
@@ -367,7 +370,7 @@ class LessonPrepService:
             yield _sse_event("section", {
                 "index": idx + 1,
                 "title": section.get("title", ""),
-                "content": section,
+                "content": convert_keys_camel(section),
             })
 
     # ════════════════════════════════════════════════════════════

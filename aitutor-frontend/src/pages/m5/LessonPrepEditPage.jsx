@@ -20,15 +20,44 @@ const EMPTY_SYLLABUS = {
   }],
 }
 
-// 从详情数据中提取 syllabus（兼容后端返回结构）
+// snake_case → camelCase：AI/prompt 按 snake_case 输出（core_content / teaching_goals
+// / key_points / difficult_points / teaching_process），页面按 camelCase 渲染。
+// 不转换就会整片空白，看起来像"要用户自己填"。
+const camelizeKey = (key) => key.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())
+const deepCamelize = (value) => {
+  if (Array.isArray(value)) return value.map(deepCamelize)
+  if (value && typeof value === 'object') {
+    const out = {}
+    Object.keys(value).forEach((k) => { out[camelizeKey(k)] = deepCamelize(value[k]) })
+    return out
+  }
+  return value
+}
+
+// 从详情数据中提取 syllabus（兼容后端多种返回结构 + 字段命名）
 const extractSyllabus = (data) => {
-  if (data?.syllabus) return data.syllabus
-  // 尝试从 pptStructure 中解析
+  const candidates = []
+  if (data?.syllabus) candidates.push(data.syllabus)
+
+  // 后端把 syllabus 存在 generatedContentJson 中
+  if (data?.generatedContentJson) {
+    try {
+      const parsed = typeof data.generatedContentJson === 'string'
+        ? JSON.parse(data.generatedContentJson)
+        : data.generatedContentJson
+      if (parsed?.syllabus) candidates.push(parsed.syllabus)
+      if (parsed?.sections) candidates.push(parsed)
+    } catch (e) { /* ignore */ }
+  }
+
+  // 兜底：从 pptStructure 中解析
   try {
     const parsed = typeof data?.pptStructure === 'string' ? JSON.parse(data.pptStructure) : data?.pptStructure
-    if (parsed?.syllabus) return parsed.syllabus
+    if (parsed?.syllabus) candidates.push(parsed.syllabus)
   } catch (e) { /* ignore */ }
-  return null
+
+  const raw = candidates.find((item) => item && (item.sections || item.title))
+  return raw ? deepCamelize(raw) : null
 }
 
 const scrollbarStyles = `
